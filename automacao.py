@@ -5,6 +5,8 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
+import pyautogui as pg
+
 
 from selenium import webdriver
 from selenium.common.exceptions import (
@@ -38,6 +40,7 @@ CAMINHO_PUBLIC = "/public"
 CAMINHO_DASHBOARDS = "/public/dashboards"
 CAMINHO_GESTAO = "/public/dashboards/gestao-operacional"
 ARQUIVO_DESTINO = "acompanhamento_separacao_v01.wcdf"
+ABRIR_OUTRA_GUIA_ARQUIVO_DESTINO = "Open in a new window"
 
 
 # ============================================================
@@ -718,7 +721,7 @@ def abrir_e_selecionar_pasta(
 def localizadores_arquivo(
     nome_arquivo: str,
 ) -> list[tuple[str, str]]:
-    """Seletores possíveis para o arquivo na coluna Files."""
+    """Cria seletores possíveis para um arquivo na coluna Files."""
     return [
         (
             By.XPATH,
@@ -748,9 +751,14 @@ def localizadores_arquivo(
 
 
 def obter_elemento_clicavel_do_arquivo(elemento):
-    """Tenta retornar o container clicável do arquivo."""
-    try:
-        container = elemento.find_element(
+    """
+    Retorna o container clicável do arquivo quando ele existir.
+
+    Caso não seja possível localizar o container, retorna o próprio
+    elemento encontrado.
+    """
+    localizadores_container = [
+        (
             By.XPATH,
             (
                 "./ancestor::*["
@@ -760,25 +768,44 @@ def obter_elemento_clicavel_do_arquivo(elemento):
                 ")"
                 "][1]"
             ),
-        )
+        ),
+        (
+            By.XPATH,
+            (
+                "./ancestor::*["
+                "@path or @title"
+                "][1]"
+            ),
+        ),
+    ]
 
-        if container.is_displayed():
-            return container
+    for tipo, seletor in localizadores_container:
+        try:
+            container = elemento.find_element(
+                tipo,
+                seletor,
+            )
 
-    except (
-        NoSuchElementException,
-        StaleElementReferenceException,
-        WebDriverException,
-    ):
-        pass
+            if container.is_displayed():
+                return container
+
+        except (
+            NoSuchElementException,
+            StaleElementReferenceException,
+            WebDriverException,
+        ):
+            continue
 
     return elemento
 
 
-def abrir_arquivo(nome_arquivo: str) -> None:
-    """Aguarda o arquivo e executa duplo clique."""
-    atualizar_status(f"Aguardando o arquivo {nome_arquivo}...")
+def localizar_arquivo_clicavel(nome_arquivo: str):
+    """
+    Localiza novamente o arquivo e retorna seu elemento clicável.
 
+    O Pentaho pode recriar o DOM depois de cada interação. Por isso,
+    essa função deve ser chamada novamente antes de cada nova ação.
+    """
     elemento = esperar_elemento(
         localizadores_arquivo(nome_arquivo),
         clicavel=True,
@@ -786,13 +813,329 @@ def abrir_arquivo(nome_arquivo: str) -> None:
         descricao=f"arquivo {nome_arquivo}",
     )
 
-    elemento_clicavel = obter_elemento_clicavel_do_arquivo(
+    return obter_elemento_clicavel_do_arquivo(
         elemento
     )
 
-    atualizar_status(f"Abrindo {nome_arquivo}...")
-    clicar_duas_vezes(elemento_clicavel)
-    pausa_adicional("Abertura do relatório")
+
+def arquivo_esta_selecionado(elemento) -> bool:
+    """Verifica sinais comuns de seleção no arquivo."""
+    try:
+        classes = (
+            elemento.get_attribute("class") or ""
+        ).lower().split()
+
+        aria_selected = (
+            elemento.get_attribute("aria-selected") or ""
+        ).lower()
+
+        return (
+            "selected" in classes
+            or "active" in classes
+            or "highlighted" in classes
+            or aria_selected == "true"
+        )
+
+    except (
+        StaleElementReferenceException,
+        WebDriverException,
+    ):
+        return False
+
+
+def selecionar_arquivo(nome_arquivo: str) -> None:
+    """
+    Seleciona o arquivo com um único clique.
+
+    Esta função não abre o arquivo e não executa duplo clique.
+    """
+    atualizar_status(
+        f"Aguardando o arquivo {nome_arquivo}..."
+    )
+
+    arquivo = localizar_arquivo_clicavel(
+        nome_arquivo
+    )
+
+    atualizar_status(
+        f"Selecionando {nome_arquivo}..."
+    )
+
+    # Clique simples: apenas seleciona.
+    clicar(arquivo)
+
+    # Dá tempo para o Pentaho atualizar a barra de ações.
+    time.sleep(0.8)
+
+    # Tenta confirmar visualmente a seleção, sem transformar
+    # a ausência dessa classe em erro.
+    try:
+        arquivo = localizar_arquivo_clicavel(
+            nome_arquivo
+        )
+
+        if arquivo_esta_selecionado(arquivo):
+            logger.info(
+                "Arquivo confirmado como selecionado: %s",
+                nome_arquivo,
+            )
+        else:
+            logger.info(
+                "Clique simples executado no arquivo: %s",
+                nome_arquivo,
+            )
+
+    except TimeoutException:
+        logger.warning(
+            "O arquivo não pôde ser localizado novamente "
+            "após a seleção."
+        )
+
+    pausa_adicional("Seleção do arquivo")
+
+
+def clicar_com_botao_direito(elemento) -> None:
+    """Abre o menu de contexto usando o botão direito."""
+    rolar_ate_elemento(elemento)
+
+    try:
+        ActionChains(driver).move_to_element(
+            elemento
+        ).pause(
+            0.3
+        ).context_click().perform()
+
+        return
+
+    except (
+        StaleElementReferenceException,
+        WebDriverException,
+    ):
+        pass
+
+    driver.execute_script(
+        """
+        arguments[0].dispatchEvent(
+            new MouseEvent("contextmenu", {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                button: 2,
+                buttons: 2
+            })
+        );
+        """,
+        elemento,
+    )
+
+
+def localizadores_acao_arquivo(
+    nome_acao: str,
+) -> list[tuple[str, str]]:
+    """Cria seletores para ações exibidas após selecionar o arquivo."""
+    return [
+        (
+            By.XPATH,
+            f"//*[normalize-space()='{nome_acao}']",
+        ),
+        (
+            By.XPATH,
+            (
+                "//*[contains("
+                f"normalize-space(), '{nome_acao}'"
+                ")]"
+            ),
+        ),
+        (
+            By.CSS_SELECTOR,
+            f"[title='{nome_acao}']",
+        ),
+        (
+            By.CSS_SELECTOR,
+            f"[aria-label='{nome_acao}']",
+        ),
+        (
+            By.CSS_SELECTOR,
+            f"[data-tooltip='{nome_acao}']",
+        ),
+        (
+            By.XPATH,
+            (
+                "//*[@title="
+                f"'{nome_acao}' or "
+                f"@aria-label='{nome_acao}']"
+            ),
+        ),
+    ]
+
+
+def aguardar_nova_janela(
+    janelas_anteriores: set[str],
+    timeout: int = 20,
+) -> str | None:
+    """
+    Aguarda uma nova guia ou janela.
+
+    Retorna o identificador da nova janela ou None quando o Pentaho
+    reutilizar a própria guia.
+    """
+    try:
+        WebDriverWait(
+            driver,
+            timeout,
+            poll_frequency=INTERVALO_VERIFICACAO,
+        ).until(
+            lambda navegador: bool(
+                set(navegador.window_handles)
+                - janelas_anteriores
+            )
+        )
+
+    except TimeoutException:
+        return None
+
+    novas_janelas = (
+        set(driver.window_handles)
+        - janelas_anteriores
+    )
+
+    if not novas_janelas:
+        return None
+
+    return novas_janelas.pop()
+
+
+def abrir_arquivo_em_nova_janela(
+    nome_arquivo: str,
+    nome_acao: str = "Open in a new window",
+) -> None:
+    """
+    Abre o arquivo selecionado por meio da opção
+    'Open in a new window'.
+
+    Fluxo:
+    1. O arquivo já deve estar selecionado.
+    2. Procura a ação na barra de ferramentas.
+    3. Se não encontrar, abre o menu de contexto.
+    4. Clica na ação.
+    5. Troca para a nova guia/janela quando ela existir.
+    """
+    atualizar_status(
+        f"Procurando a opção {nome_acao}..."
+    )
+
+    janelas_anteriores = set(
+        driver.window_handles
+    )
+
+    try:
+        # Algumas versões mostram a ação diretamente na barra
+        # depois que o arquivo é selecionado.
+        opcao = esperar_elemento(
+            localizadores_acao_arquivo(
+                nome_acao
+            ),
+            clicavel=True,
+            timeout=5,
+            descricao=f"opção {nome_acao}",
+        )
+
+    except TimeoutException:
+        atualizar_status(
+            "Ação não apareceu na barra. "
+            "Abrindo o menu de contexto..."
+        )
+
+        # Localiza novamente, pois o DOM pode ter sido recriado.
+        arquivo = localizar_arquivo_clicavel(
+            nome_arquivo
+        )
+
+        clicar_com_botao_direito(
+            arquivo
+        )
+
+        opcao = esperar_elemento(
+            localizadores_acao_arquivo(
+                nome_acao
+            ),
+            clicavel=True,
+            timeout=TIMEOUT,
+            descricao=f"opção {nome_acao}",
+        )
+
+    atualizar_status(
+        f"Clicando em {nome_acao}..."
+    )
+
+    clicar(opcao)
+
+    nova_janela = aguardar_nova_janela(
+        janelas_anteriores,
+        timeout=20,
+    )
+
+    if nova_janela is not None:
+        driver.switch_to.window(
+            nova_janela
+        )
+
+        atualizar_status(
+            "Relatório aberto em uma nova janela."
+        )
+
+        try:
+            aguardar_documento_pronto(
+                timeout=TIMEOUT
+            )
+        except TimeoutException:
+            logger.warning(
+                "A nova janela foi aberta, mas o documento "
+                "não atingiu readyState=complete dentro do prazo."
+            )
+
+    else:
+        logger.warning(
+            "A ação foi clicada, mas nenhuma nova guia foi "
+            "detectada. O Pentaho pode ter reutilizado a guia atual."
+        )
+
+        atualizar_status(
+            "A ação foi executada na guia atual."
+        )
+
+    pausa_adicional(
+        "Abertura do relatório em nova janela"
+    )
+
+
+def abrir_arquivo(nome_arquivo: str) -> None:
+    """
+    Abre um arquivo com duplo clique.
+
+    Esta função permanece disponível para outros processos.
+    Para o acompanhamento de separação, use selecionar_arquivo()
+    seguido de abrir_arquivo_em_nova_janela().
+    """
+    atualizar_status(
+        f"Aguardando o arquivo {nome_arquivo}..."
+    )
+
+    arquivo = localizar_arquivo_clicavel(
+        nome_arquivo
+    )
+
+    atualizar_status(
+        f"Abrindo {nome_arquivo}..."
+    )
+
+    clicar_duas_vezes(
+        arquivo
+    )
+
+    pausa_adicional(
+        "Abertura do relatório"
+    )
 
 
 # ============================================================
@@ -841,7 +1184,19 @@ def executar_processo() -> None:
             caminho=CAMINHO_GESTAO,
         )
 
-        abrir_arquivo(ARQUIVO_DESTINO)
+        # Apenas seleciona o WCDF com um clique simples.
+        selecionar_arquivo(
+            ARQUIVO_DESTINO
+        )
+
+        # Depois clica na ação "Open in a new window".
+        abrir_arquivo_em_nova_janela(
+            nome_arquivo=ARQUIVO_DESTINO,
+            nome_acao=ABRIR_OUTRA_GUIA_ARQUIVO_DESTINO,
+        )
+        time.sleep(3)
+
+        pg.press("f11")  # Ativa o modo de tela cheia do Chrome
 
         logger.info("Processo concluído com sucesso.")
 
@@ -886,18 +1241,18 @@ def executar_processo() -> None:
 # ============================================================
 
 def validar_configuracao() -> bool:
-    """Valida as credenciais antes de abrir o navegador."""
+    """Valida as credenciais antes de iniciar o navegador."""
     if not USUARIO or USUARIO == "SEU_USUARIO":
         messagebox.showwarning(
             "Credenciais",
-            "Defina PENTAHO_USUARIO antes de executar.",
+            "Defina PENTAHO_USUARIO ou altere USUARIO no arquivo.",
         )
         return False
 
     if not SENHA or SENHA == "SUA_SENHA":
         messagebox.showwarning(
             "Credenciais",
-            "Defina PENTAHO_SENHA antes de executar.",
+            "Defina PENTAHO_SENHA ou altere SENHA no arquivo.",
         )
         return False
 
@@ -905,7 +1260,7 @@ def validar_configuracao() -> bool:
 
 
 def iniciar_processo_automaticamente() -> None:
-    """Inicia o Selenium em outra thread."""
+    """Inicia a automação em outra thread."""
     global processo_em_execucao
 
     if processo_em_execucao:
@@ -928,11 +1283,7 @@ def iniciar_processo_automaticamente() -> None:
 
 
 def executar_contagem_regressiva(segundos: int) -> None:
-    """
-    Exibe 5, 4, 3, 2, 1 sem congelar a janela.
-
-    Não utiliza time.sleep na thread do Tkinter.
-    """
+    """Exibe 5, 4, 3, 2, 1 e inicia automaticamente."""
     if segundos > 0:
         contador_variavel.set(f"Executando em: {segundos}")
         status_variavel.set(
@@ -950,7 +1301,7 @@ def executar_contagem_regressiva(segundos: int) -> None:
 
 
 def ao_fechar_janela() -> None:
-    """Confirma o fechamento quando a automação está rodando."""
+    """Confirma o fechamento durante uma execução."""
     if processo_em_execucao:
         fechar = messagebox.askyesno(
             "Processo em execução",
@@ -968,7 +1319,7 @@ def ao_fechar_janela() -> None:
 
 
 # ============================================================
-# JANELA DE AVISO
+# JANELA
 # ============================================================
 
 janela = tk.Tk()
@@ -980,6 +1331,7 @@ janela.protocol("WM_DELETE_WINDOW", ao_fechar_janela)
 contador_variavel = tk.StringVar(
     value=f"Executando em: {CONTAGEM_INICIAL}"
 )
+
 status_variavel = tk.StringVar(
     value="A automação será iniciada automaticamente."
 )
@@ -1006,11 +1358,15 @@ cancelar_label = tk.Label(
 )
 cancelar_label.pack(pady=8)
 
-# Começa automaticamente logo após a janela aparecer.
-janela.after(
-    250,
-    executar_contagem_regressiva,
-    CONTAGEM_INICIAL,
-)
 
-janela.mainloop()
+def main() -> None:
+    janela.after(
+        250,
+        executar_contagem_regressiva,
+        CONTAGEM_INICIAL,
+    )
+    janela.mainloop()
+
+
+if __name__ == "__main__":
+    main()

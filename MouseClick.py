@@ -5,7 +5,6 @@ try:
     while True:
         # Pega a posição atual X e Y
         x, y = pyautogui.position()
-        r
         # Formata a mensagem
         posicao = f"X: {x} | Y: {y}"
         print(posicao, end="\r")
