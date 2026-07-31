@@ -3,8 +3,6 @@ import os
 import threading
 import time
 import tkinter as tk
-
-from functools import wraps
 from pathlib import Path
 from tkinter import messagebox
 
@@ -28,24 +26,17 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 URL = "http://operationsreports.superfrio.com.br:8080/pentaho/Home"
 
-# Opção 2, recomendada: use variáveis de ambiente.
 USUARIO = os.getenv("PENTAHO_USUARIO", "JOAO.PEREIRA")
 SENHA = os.getenv("PENTAHO_SENHA", "jPereira!@#")
 
-# Tempo máximo para cada elemento aparecer.
 TIMEOUT = 90
-
-# Frequência com que o Selenium verifica a página.
 INTERVALO_VERIFICACAO = 0.30
-
-# Espera adicional após cada grande etapa.
 PAUSA_GLOBAL = 3.0
+CONTAGEM_INICIAL = 5
 
-# Caminhos esperados no Pentaho.
 CAMINHO_PUBLIC = "/public"
 CAMINHO_DASHBOARDS = "/public/dashboards"
 CAMINHO_GESTAO = "/public/dashboards/gestao-operacional"
-
 ARQUIVO_DESTINO = "acompanhamento_separacao_v01.wcdf"
 
 
@@ -75,66 +66,36 @@ logger = logging.getLogger("pentaho-automation")
 # ============================================================
 
 def atualizar_status(texto: str) -> None:
-    """Agenda a atualização do texto na thread do Tkinter."""
+    """Atualiza o status na thread principal do Tkinter."""
     logger.info(texto)
 
-    janela.after(
-        0,
-        lambda texto=texto: status_label.config(
-            text=texto
-        ),
-    )
+    if janela.winfo_exists():
+        janela.after(
+            0,
+            lambda texto=texto: status_variavel.set(texto),
+        )
 
 
 def exibir_erro(titulo: str, mensagem: str) -> None:
-    janela.after(
-        0,
-        lambda titulo=titulo, mensagem=mensagem: (
-            messagebox.showerror(
+    """Exibe um erro sem acessar o Tkinter pela thread do Selenium."""
+    if janela.winfo_exists():
+        janela.after(
+            0,
+            lambda titulo=titulo, mensagem=mensagem: messagebox.showerror(
                 titulo,
                 mensagem,
-            )
-        ),
-    )
-
-
-def exibir_sucesso(mensagem: str) -> None:
-    janela.after(
-        0,
-        lambda mensagem=mensagem: (
-            messagebox.showinfo(
-                "Processo concluído",
-                mensagem,
-            )
-        ),
-    )
-
-
-# ============================================================
-# PAUSA GLOBAL
-# ============================================================
-
-def pausar_apos_etapa(funcao):
-    """
-    Aplica PAUSA_GLOBAL depois de uma função de alto nível.
-
-    As esperas explícitas continuam sendo utilizadas.
-    A pausa global funciona apenas como margem adicional.
-    """
-
-    @wraps(funcao)
-    def funcao_com_pausa(*args, **kwargs):
-        resultado = funcao(*args, **kwargs)
-
-        atualizar_status(
-            f"Etapa concluída. Aguardando {PAUSA_GLOBAL:.1f}s..."
+            ),
         )
 
-        time.sleep(PAUSA_GLOBAL)
 
-        return resultado
+def concluir_interface() -> None:
+    """Mostra a conclusão e fecha a pequena janela automaticamente."""
+    if not janela.winfo_exists():
+        return
 
-    return funcao_com_pausa
+    status_variavel.set("Processo concluído com sucesso.")
+    contador_variavel.set("Concluído")
+    janela.after(2500, janela.destroy)
 
 
 # ============================================================
@@ -142,56 +103,41 @@ def pausar_apos_etapa(funcao):
 # ============================================================
 
 def salvar_diagnostico(nome: str = "erro") -> None:
-    """
-    Salva screenshot e HTML quando ocorrer um erro.
-
-    Os arquivos serão criados dentro de:
-        diagnosticos/
-    """
+    """Salva screenshot e HTML quando ocorre um erro."""
     if driver is None:
         return
 
     try:
         pasta = Path("diagnosticos")
-        pasta.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        pasta.mkdir(parents=True, exist_ok=True)
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-
         screenshot = pasta / f"{nome}_{timestamp}.png"
         html = pasta / f"{nome}_{timestamp}.html"
 
-        driver.save_screenshot(
-            str(screenshot)
-        )
+        driver.save_screenshot(str(screenshot))
+        html.write_text(driver.page_source, encoding="utf-8")
 
-        html.write_text(
-            driver.page_source,
-            encoding="utf-8",
-        )
-
-        logger.info(
-            "Diagnóstico salvo em: %s",
-            pasta.resolve(),
-        )
+        logger.info("Diagnóstico salvo em: %s", pasta.resolve())
 
     except Exception:
-        logger.exception(
-            "Não foi possível salvar o diagnóstico."
-        )
+        logger.exception("Não foi possível salvar o diagnóstico.")
 
 
 # ============================================================
-# FUNÇÕES BÁSICAS DO SELENIUM
+# ESPERAS
 # ============================================================
 
-def aguardar_documento_pronto(
-    timeout: int = TIMEOUT,
-) -> None:
-    """Espera o documento atual terminar de carregar."""
+def pausa_adicional(descricao: str) -> None:
+    """Aplica a pausa global depois de uma grande etapa."""
+    atualizar_status(
+        f"{descricao} concluído. Aguardando {PAUSA_GLOBAL:.1f}s..."
+    )
+    time.sleep(PAUSA_GLOBAL)
 
+
+def aguardar_documento_pronto(timeout: int = TIMEOUT) -> None:
+    """Espera document.readyState ficar igual a complete."""
     WebDriverWait(
         driver,
         timeout,
@@ -203,11 +149,8 @@ def aguardar_documento_pronto(
     )
 
 
-def elemento_esta_disponivel(
-    elemento,
-    clicavel: bool,
-) -> bool:
-    """Verifica se o elemento ainda existe e está visível."""
+def elemento_esta_disponivel(elemento, clicavel: bool) -> bool:
+    """Verifica se um elemento está visível e utilizável."""
     try:
         if not elemento.is_displayed():
             return False
@@ -224,27 +167,23 @@ def elemento_esta_disponivel(
         return False
 
 
+# ============================================================
+# BUSCA NA PÁGINA E NOS IFRAMES
+# ============================================================
+
 def procurar_no_contexto_atual(
     localizadores: list[tuple[str, str]],
     clicavel: bool,
 ):
-    """Procura um elemento no documento ou iframe atual."""
-
+    """Procura no documento ou iframe atual."""
     for tipo, seletor in localizadores:
         try:
-            elementos = driver.find_elements(
-                tipo,
-                seletor,
-            )
-
+            elementos = driver.find_elements(tipo, seletor)
         except WebDriverException:
             continue
 
         for elemento in elementos:
-            if elemento_esta_disponivel(
-                elemento,
-                clicavel,
-            ):
+            if elemento_esta_disponivel(elemento, clicavel):
                 return elemento
 
     return None
@@ -256,11 +195,10 @@ def procurar_recursivamente_nos_frames(
     profundidade: int = 0,
 ):
     """
-    Procura um elemento na página e dentro de todos os frames.
+    Procura na página e dentro de frames/iframes.
 
-    Quando encontra, mantém o driver no frame correto.
+    Quando encontra, o driver permanece no frame correto.
     """
-
     if profundidade > 10:
         return None
 
@@ -277,7 +215,6 @@ def procurar_recursivamente_nos_frames(
             By.CSS_SELECTOR,
             "iframe, frame",
         )
-
     except WebDriverException:
         return None
 
@@ -307,7 +244,6 @@ def procurar_recursivamente_nos_frames(
         if entrou_no_frame:
             try:
                 driver.switch_to.parent_frame()
-
             except WebDriverException:
                 driver.switch_to.default_content()
 
@@ -321,12 +257,7 @@ def esperar_elemento(
     timeout: int = TIMEOUT,
     descricao: str = "elemento",
 ):
-    """
-    Aguarda um elemento na página principal ou em qualquer iframe.
-
-    O driver permanece dentro do frame onde o elemento
-    foi encontrado.
-    """
+    """Aguarda um elemento na página ou em qualquer iframe."""
     limite = time.monotonic() + timeout
 
     while time.monotonic() < limite:
@@ -339,11 +270,7 @@ def esperar_elemento(
             )
 
             if elemento is not None:
-                logger.info(
-                    "Elemento encontrado: %s",
-                    descricao,
-                )
-
+                logger.info("Elemento encontrado: %s", descricao)
                 return elemento
 
         except WebDriverException:
@@ -361,31 +288,12 @@ def esperar_elemento(
     )
 
 
-def elemento_existe(
-    localizadores: list[tuple[str, str]],
-    timeout: float = 3,
-) -> bool:
-    """Verifica rapidamente se um elemento existe."""
-    try:
-        esperar_elemento(
-            localizadores,
-            clicavel=False,
-            timeout=int(timeout),
-            descricao="verificação rápida",
-        )
-
-        return True
-
-    except TimeoutException:
-        return False
-
-
 # ============================================================
 # CLIQUES
 # ============================================================
 
 def rolar_ate_elemento(elemento) -> None:
-    """Centraliza o elemento na tela."""
+    """Centraliza o elemento na área visível."""
     driver.execute_script(
         """
         arguments[0].scrollIntoView({
@@ -396,24 +304,16 @@ def rolar_ate_elemento(elemento) -> None:
         """,
         elemento,
     )
-
     time.sleep(0.4)
 
 
 def clicar(elemento) -> None:
-    """
-    Tenta clicar de três formas:
-
-    1. Selenium normal.
-    2. ActionChains.
-    3. JavaScript.
-    """
+    """Tenta clique normal, ActionChains e JavaScript."""
     rolar_ate_elemento(elemento)
 
     try:
         elemento.click()
         return
-
     except (
         StaleElementReferenceException,
         WebDriverException,
@@ -423,12 +323,8 @@ def clicar(elemento) -> None:
     try:
         ActionChains(driver).move_to_element(
             elemento
-        ).pause(
-            0.3
-        ).click().perform()
-
+        ).pause(0.3).click().perform()
         return
-
     except (
         StaleElementReferenceException,
         WebDriverException,
@@ -460,22 +356,14 @@ def clicar(elemento) -> None:
 
 
 def clicar_duas_vezes(elemento) -> None:
-    """
-    Executa duplo clique no arquivo.
-
-    Usa ActionChains e possui JavaScript como alternativa.
-    """
+    """Executa duplo clique com fallback JavaScript."""
     rolar_ate_elemento(elemento)
 
     try:
         ActionChains(driver).move_to_element(
             elemento
-        ).pause(
-            0.3
-        ).double_click().perform()
-
+        ).pause(0.3).double_click().perform()
         return
-
     except (
         StaleElementReferenceException,
         WebDriverException,
@@ -501,35 +389,28 @@ def clicar_duas_vezes(elemento) -> None:
 # LOGIN
 # ============================================================
 
-@pausar_apos_etapa
 def realizar_login() -> None:
-    """
-    Realiza o login.
-
-    Caso a sessão já esteja autenticada, ignora esta etapa.
-    """
+    """Realiza o login ou continua se a sessão já estiver autenticada."""
     atualizar_status("Verificando a tela de login...")
-
-    localizadores_usuario = [
-        (By.ID, "j_username"),
-        (By.NAME, "j_username"),
-        (By.ID, "username"),
-        (By.NAME, "username"),
-        (By.CSS_SELECTOR, "input[type='text']"),
-    ]
 
     try:
         campo_usuario = esperar_elemento(
-            localizadores_usuario,
+            [
+                (By.ID, "j_username"),
+                (By.NAME, "j_username"),
+                (By.ID, "username"),
+                (By.NAME, "username"),
+                (By.CSS_SELECTOR, "input[type='text']"),
+            ],
             clicavel=True,
             timeout=12,
             descricao="campo de usuário",
         )
-
     except TimeoutException:
         atualizar_status(
-            "Tela de login não encontrada. A sessão pode estar autenticada."
+            "Tela de login não encontrada; a sessão pode estar autenticada."
         )
+        pausa_adicional("Verificação do login")
         return
 
     campo_senha = esperar_elemento(
@@ -560,26 +441,12 @@ def realizar_login() -> None:
     )
 
     atualizar_status("Realizando login...")
-
     clicar(botao_login)
 
     driver.switch_to.default_content()
-
-    atualizar_status(
-        "Aguardando o Pentaho concluir o login..."
-    )
-
-    WebDriverWait(
-        driver,
-        TIMEOUT,
-        poll_frequency=INTERVALO_VERIFICACAO,
-    ).until(
-        lambda navegador: (
-            navegador.execute_script(
-                "return document.readyState"
-            ) == "complete"
-        )
-    )
+    atualizar_status("Aguardando o Pentaho concluir o login...")
+    aguardar_documento_pronto()
+    pausa_adicional("Login")
 
 
 # ============================================================
@@ -587,9 +454,7 @@ def realizar_login() -> None:
 # ============================================================
 
 def abrir_browse_por_javascript() -> bool:
-    """
-    Executa diretamente a função usada pelo botão Browse Files.
-    """
+    """Executa diretamente mantle_setPerspective."""
     driver.switch_to.default_content()
 
     try:
@@ -602,7 +467,6 @@ def abrir_browse_por_javascript() -> bool:
                     window.mantle_setPerspective(
                         "browser.perspective"
                     );
-
                     return true;
                 }
 
@@ -614,7 +478,6 @@ def abrir_browse_por_javascript() -> bool:
                     window.parent.mantle_setPerspective(
                         "browser.perspective"
                     );
-
                     return true;
                 }
 
@@ -622,17 +485,13 @@ def abrir_browse_por_javascript() -> bool:
                 """
             )
         )
-
     except JavascriptException:
         return False
 
 
-@pausar_apos_etapa
 def abrir_browse_files() -> None:
     """Abre a perspectiva Browse Files."""
-    atualizar_status(
-        "Aguardando o botão Browse Files..."
-    )
+    atualizar_status("Aguardando o botão Browse Files...")
 
     try:
         botao = esperar_elemento(
@@ -654,15 +513,12 @@ def abrir_browse_files() -> None:
             descricao="botão Browse Files",
         )
 
-        atualizar_status(
-            "Clicando em Browse Files..."
-        )
-
+        atualizar_status("Clicando em Browse Files...")
         clicar(botao)
 
     except TimeoutException:
         atualizar_status(
-            "Botão não encontrado. Abrindo Browse Files por JavaScript..."
+            "Botão não encontrado; abrindo Browse Files por JavaScript..."
         )
 
         if not abrir_browse_por_javascript():
@@ -670,19 +526,16 @@ def abrir_browse_files() -> None:
                 "Não foi possível abrir a perspectiva Browse Files."
             )
 
-    atualizar_status(
-        "Aguardando a árvore de pastas..."
-    )
+    atualizar_status("Aguardando a árvore de pastas...")
 
     esperar_elemento(
-        localizadores_pasta(
-            "Public",
-            CAMINHO_PUBLIC,
-        ),
+        localizadores_pasta("Public", CAMINHO_PUBLIC),
         clicavel=False,
         timeout=TIMEOUT,
         descricao="pasta Public",
     )
+
+    pausa_adicional("Abertura do Browse Files")
 
 
 # ============================================================
@@ -693,12 +546,7 @@ def localizadores_pasta(
     nome: str,
     caminho: str,
 ) -> list[tuple[str, str]]:
-    """
-    Cria seletores para uma pasta.
-
-    Primeiro tenta localizar pelo atributo path.
-    Depois tenta localizar pelo texto visível.
-    """
+    """Cria seletores para uma pasta do Pentaho."""
     return [
         (
             By.CSS_SELECTOR,
@@ -741,18 +589,13 @@ def localizadores_pasta(
     ]
 
 
-def localizar_titulo_da_pasta(
-    pasta,
-    nome: str,
-):
-    """Localiza o título direto de uma pasta."""
+def localizar_titulo_da_pasta(pasta, nome: str):
+    """Localiza o título direto da pasta."""
     localizadores_relativos = [
         (
             By.XPATH,
-            (
-                "./div[contains(@class,'element')]"
-                "/div[contains(@class,'title')]"
-            ),
+            "./div[contains(@class,'element')]"
+            "/div[contains(@class,'title')]",
         ),
         (
             By.CSS_SELECTOR,
@@ -762,10 +605,7 @@ def localizar_titulo_da_pasta(
 
     for tipo, seletor in localizadores_relativos:
         try:
-            elementos = pasta.find_elements(
-                tipo,
-                seletor,
-            )
+            elementos = pasta.find_elements(tipo, seletor)
 
             for elemento in elementos:
                 if (
@@ -790,7 +630,6 @@ def localizar_titulo_da_pasta(
                 "]"
             ),
         )
-
     except NoSuchElementException as erro:
         raise TimeoutException(
             f"O título da pasta {nome} não foi encontrado."
@@ -802,10 +641,8 @@ def localizar_expansor_da_pasta(pasta):
     localizadores = [
         (
             By.XPATH,
-            (
-                "./div[contains(@class,'element')]"
-                "/div[contains(@class,'expandCollapse')]"
-            ),
+            "./div[contains(@class,'element')]"
+            "/div[contains(@class,'expandCollapse')]",
         ),
         (
             By.CSS_SELECTOR,
@@ -815,10 +652,7 @@ def localizar_expansor_da_pasta(pasta):
 
     for tipo, seletor in localizadores:
         try:
-            elementos = pasta.find_elements(
-                tipo,
-                seletor,
-            )
+            elementos = pasta.find_elements(tipo, seletor)
 
             for elemento in elementos:
                 if elemento.is_displayed():
@@ -833,26 +667,15 @@ def localizar_expansor_da_pasta(pasta):
     return None
 
 
-@pausar_apos_etapa
 def abrir_e_selecionar_pasta(
     nome: str,
     caminho: str,
 ) -> None:
-    """
-    Expande e seleciona uma pasta da árvore.
-
-    A pasta é localizada novamente depois da expansão porque
-    o Pentaho pode recriar o elemento no DOM.
-    """
-    atualizar_status(
-        f"Aguardando a pasta {nome}..."
-    )
+    """Expande e seleciona uma pasta da árvore."""
+    atualizar_status(f"Aguardando a pasta {nome}...")
 
     pasta = esperar_elemento(
-        localizadores_pasta(
-            nome,
-            caminho,
-        ),
+        localizadores_pasta(nome, caminho),
         clicavel=False,
         timeout=TIMEOUT,
         descricao=f"pasta {nome}",
@@ -861,49 +684,31 @@ def abrir_e_selecionar_pasta(
     rolar_ate_elemento(pasta)
 
     try:
-        classes = (
-            pasta.get_attribute("class") or ""
-        ).split()
-
+        classes = (pasta.get_attribute("class") or "").split()
     except StaleElementReferenceException:
         classes = []
 
     if "open" not in classes:
-        expansor = localizar_expansor_da_pasta(
-            pasta
-        )
+        expansor = localizar_expansor_da_pasta(pasta)
 
         if expansor is not None:
-            atualizar_status(
-                f"Expandindo a pasta {nome}..."
-            )
-
+            atualizar_status(f"Expandindo a pasta {nome}...")
             clicar(expansor)
-
-            # Aguarda o Pentaho processar a expansão.
             time.sleep(1)
 
-    # O Pentaho pode recriar o elemento depois da expansão.
+    # O DOM pode ser recriado depois da expansão.
     pasta = esperar_elemento(
-        localizadores_pasta(
-            nome,
-            caminho,
-        ),
+        localizadores_pasta(nome, caminho),
         clicavel=False,
         timeout=TIMEOUT,
         descricao=f"pasta {nome} após expansão",
     )
 
-    titulo = localizar_titulo_da_pasta(
-        pasta,
-        nome,
-    )
+    titulo = localizar_titulo_da_pasta(pasta, nome)
 
-    atualizar_status(
-        f"Selecionando a pasta {nome}..."
-    )
-
+    atualizar_status(f"Selecionando a pasta {nome}...")
     clicar(titulo)
+    pausa_adicional(f"Seleção da pasta {nome}")
 
 
 # ============================================================
@@ -917,11 +722,7 @@ def localizadores_arquivo(
     return [
         (
             By.XPATH,
-            (
-                "//*["
-                f"normalize-space()='{nome_arquivo}'"
-                "]"
-            ),
+            f"//*[normalize-space()='{nome_arquivo}']",
         ),
         (
             By.CSS_SELECTOR,
@@ -946,13 +747,8 @@ def localizadores_arquivo(
     ]
 
 
-def obter_elemento_clicavel_do_arquivo(
-    elemento,
-):
-    """
-    Tenta usar o container do arquivo em vez de apenas
-    o texto interno.
-    """
+def obter_elemento_clicavel_do_arquivo(elemento):
+    """Tenta retornar o container clicável do arquivo."""
     try:
         container = elemento.find_element(
             By.XPATH,
@@ -979,22 +775,12 @@ def obter_elemento_clicavel_do_arquivo(
     return elemento
 
 
-@pausar_apos_etapa
-def abrir_arquivo(
-    nome_arquivo: str,
-) -> None:
-    """
-    Aguarda o arquivo aparecer na coluna Files
-    e executa duplo clique.
-    """
-    atualizar_status(
-        f"Aguardando o arquivo {nome_arquivo}..."
-    )
+def abrir_arquivo(nome_arquivo: str) -> None:
+    """Aguarda o arquivo e executa duplo clique."""
+    atualizar_status(f"Aguardando o arquivo {nome_arquivo}...")
 
     elemento = esperar_elemento(
-        localizadores_arquivo(
-            nome_arquivo
-        ),
+        localizadores_arquivo(nome_arquivo),
         clicavel=True,
         timeout=TIMEOUT,
         descricao=f"arquivo {nome_arquivo}",
@@ -1004,13 +790,9 @@ def abrir_arquivo(
         elemento
     )
 
-    atualizar_status(
-        f"Abrindo {nome_arquivo}..."
-    )
-
-    clicar_duas_vezes(
-        elemento_clicavel
-    )
+    atualizar_status(f"Abrindo {nome_arquivo}...")
+    clicar_duas_vezes(elemento_clicavel)
+    pausa_adicional("Abertura do relatório")
 
 
 # ============================================================
@@ -1019,101 +801,57 @@ def abrir_arquivo(
 
 def executar_processo() -> None:
     """
-    Sequência:
+    Executa automaticamente:
 
-    1. Abre o Chrome.
-    2. Faz login.
-    3. Abre Browse Files.
-    4. Abre Public.
-    5. Abre dashboards.
-    6. Abre gestao-operacional.
-    7. Abre acompanhamento_separacao_v01.wcdf.
+    Pentaho > Browse Files > Public > dashboards >
+    gestao-operacional > acompanhamento_separacao_v01.wcdf
     """
     global driver
     global processo_em_execucao
 
     try:
-        atualizar_status(
-            "Abrindo o Chrome..."
-        )
+        atualizar_status("Abrindo o Chrome...")
 
         opcoes = webdriver.ChromeOptions()
+        opcoes.add_argument("--start-maximized")
+        opcoes.add_experimental_option("detach", True)
 
-        opcoes.add_argument(
-            "--start-maximized"
-        )
-
-        opcoes.add_experimental_option(
-            "detach",
-            True,
-        )
-
-        driver = webdriver.Chrome(
-            options=opcoes,
-        )
-
+        driver = webdriver.Chrome(options=opcoes)
         driver.get(URL)
 
-        atualizar_status(
-            "Aguardando a página inicial..."
-        )
-
+        atualizar_status("Aguardando a página inicial...")
         aguardar_documento_pronto()
-
         time.sleep(PAUSA_GLOBAL)
 
-        # 1. Login
         realizar_login()
-
-        # 2. Browse Files
         abrir_browse_files()
 
-        # 3. Public
         abrir_e_selecionar_pasta(
             nome="Public",
             caminho=CAMINHO_PUBLIC,
         )
 
-        # 4. Dashboards
         abrir_e_selecionar_pasta(
             nome="dashboards",
             caminho=CAMINHO_DASHBOARDS,
         )
 
-        # 5. Gestão operacional
         abrir_e_selecionar_pasta(
             nome="gestao-operacional",
             caminho=CAMINHO_GESTAO,
         )
 
-        # 6. Arquivo WCDF
-        abrir_arquivo(
-            ARQUIVO_DESTINO
-        )
+        abrir_arquivo(ARQUIVO_DESTINO)
 
-        atualizar_status(
-            "Processo concluído com sucesso."
-        )
+        logger.info("Processo concluído com sucesso.")
 
-        exibir_sucesso(
-            (
-                "O arquivo foi aberto com sucesso:\n\n"
-                f"{ARQUIVO_DESTINO}"
-            )
-        )
+        if janela.winfo_exists():
+            janela.after(0, concluir_interface)
 
     except TimeoutException as erro:
-        logger.exception(
-            "Tempo limite excedido."
-        )
-
-        atualizar_status(
-            "Tempo limite excedido."
-        )
-
-        salvar_diagnostico(
-            "timeout"
-        )
+        logger.exception("Tempo limite excedido.")
+        atualizar_status("Tempo limite excedido.")
+        salvar_diagnostico("timeout")
 
         exibir_erro(
             "Tempo limite",
@@ -1126,17 +864,9 @@ def executar_processo() -> None:
         )
 
     except Exception as erro:
-        logger.exception(
-            "Erro durante a automação."
-        )
-
-        atualizar_status(
-            "Erro durante o processo."
-        )
-
-        salvar_diagnostico(
-            "erro"
-        )
+        logger.exception("Erro durante a automação.")
+        atualizar_status("Erro durante o processo.")
+        salvar_diagnostico("erro")
 
         exibir_erro(
             "Erro",
@@ -1150,50 +880,45 @@ def executar_processo() -> None:
     finally:
         processo_em_execucao = False
 
-        janela.after(
-            0,
-            lambda: botao_executar.config(
-                state="normal"
-            ),
+
+# ============================================================
+# INÍCIO AUTOMÁTICO COM CONTAGEM REGRESSIVA
+# ============================================================
+
+def validar_configuracao() -> bool:
+    """Valida as credenciais antes de abrir o navegador."""
+    if not USUARIO or USUARIO == "SEU_USUARIO":
+        messagebox.showwarning(
+            "Credenciais",
+            "Defina PENTAHO_USUARIO antes de executar.",
         )
+        return False
+
+    if not SENHA or SENHA == "SUA_SENHA":
+        messagebox.showwarning(
+            "Credenciais",
+            "Defina PENTAHO_SENHA antes de executar.",
+        )
+        return False
+
+    return True
 
 
-def iniciar_processo() -> None:
-    """Inicia a automação sem congelar o Tkinter."""
+def iniciar_processo_automaticamente() -> None:
+    """Inicia o Selenium em outra thread."""
     global processo_em_execucao
 
     if processo_em_execucao:
         return
 
-    if (
-        not USUARIO
-        or USUARIO == "SEU_USUARIO"
-    ):
-        messagebox.showwarning(
-            "Credenciais",
-            "Defina o usuário no início do arquivo.",
-        )
-        return
-
-    if (
-        not SENHA
-        or SENHA == "SUA_SENHA"
-    ):
-        messagebox.showwarning(
-            "Credenciais",
-            "Defina a senha no início do arquivo.",
-        )
+    if not validar_configuracao():
+        contador_variavel.set("Configuração pendente")
+        status_variavel.set("Informe o usuário e a senha.")
         return
 
     processo_em_execucao = True
-
-    botao_executar.config(
-        state="disabled"
-    )
-
-    status_label.config(
-        text="Iniciando o processo..."
-    )
+    contador_variavel.set("Executando...")
+    status_variavel.set("Iniciando o processo...")
 
     threading.Thread(
         target=executar_processo,
@@ -1202,61 +927,90 @@ def iniciar_processo() -> None:
     ).start()
 
 
+def executar_contagem_regressiva(segundos: int) -> None:
+    """
+    Exibe 5, 4, 3, 2, 1 sem congelar a janela.
+
+    Não utiliza time.sleep na thread do Tkinter.
+    """
+    if segundos > 0:
+        contador_variavel.set(f"Executando em: {segundos}")
+        status_variavel.set(
+            "A automação será iniciada automaticamente."
+        )
+
+        janela.after(
+            1000,
+            executar_contagem_regressiva,
+            segundos - 1,
+        )
+        return
+
+    iniciar_processo_automaticamente()
+
+
+def ao_fechar_janela() -> None:
+    """Confirma o fechamento quando a automação está rodando."""
+    if processo_em_execucao:
+        fechar = messagebox.askyesno(
+            "Processo em execução",
+            (
+                "A automação ainda está em execução.\n"
+                "Deseja fechar somente esta janela?\n\n"
+                "O Chrome poderá continuar aberto."
+            ),
+        )
+
+        if not fechar:
+            return
+
+    janela.destroy()
+
+
 # ============================================================
-# JANELA
+# JANELA DE AVISO
 # ============================================================
 
 janela = tk.Tk()
+janela.title("Automação Pentaho")
+janela.geometry("470x220")
+janela.resizable(False, False)
+janela.protocol("WM_DELETE_WINDOW", ao_fechar_janela)
 
-janela.title(
-    "Automação Pentaho"
+contador_variavel = tk.StringVar(
+    value=f"Executando em: {CONTAGEM_INICIAL}"
+)
+status_variavel = tk.StringVar(
+    value="A automação será iniciada automaticamente."
 )
 
-janela.geometry(
-    "470x220"
-)
-
-janela.resizable(
-    False,
-    False,
-)
-
-
-titulo_label = tk.Label(
+contador_label = tk.Label(
     janela,
-    text="Processo Pentaho",
-    font=(
-        "Arial",
-        16,
-        "bold",
-    ),
+    textvariable=contador_variavel,
+    font=("Arial", 22, "bold"),
 )
-
-titulo_label.pack(
-    pady=(30, 20),
-)
-
-
-botao_executar = tk.Button(
-    janela,
-    text="Executar o processo",
-    width=28,
-    height=2,
-    command=iniciar_processo,
-)
-
-botao_executar.pack()
-
+contador_label.pack(pady=(42, 18))
 
 status_label = tk.Label(
     janela,
-    text="Pronto para executar.",
-    wraplength=430,
+    textvariable=status_variavel,
+    font=("Arial", 10),
+    wraplength=420,
 )
+status_label.pack(pady=8)
 
-status_label.pack(
-    pady=18,
-)                       
+cancelar_label = tk.Label(
+    janela,
+    text="Feche a janela durante a contagem para cancelar.",
+    font=("Arial", 9),
+)
+cancelar_label.pack(pady=8)
 
+# Começa automaticamente logo após a janela aparecer.
+janela.after(
+    250,
+    executar_contagem_regressiva,
+    CONTAGEM_INICIAL,
+)
 
 janela.mainloop()
