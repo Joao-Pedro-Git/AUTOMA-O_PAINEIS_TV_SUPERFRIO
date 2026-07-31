@@ -3,9 +3,9 @@ import os
 import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
-import pyautogui as pg
 
 
 from selenium import webdriver
@@ -19,6 +19,7 @@ from selenium.common.exceptions import (
 )
 from selenium.webdriver import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
@@ -31,6 +32,7 @@ URL = "http://operationsreports.superfrio.com.br:8080/pentaho/Home"
 USUARIO = os.getenv("PENTAHO_USUARIO", "JOAO.PEREIRA")
 SENHA = os.getenv("PENTAHO_SENHA", "jPereira!@#")
 
+
 TIMEOUT = 90
 INTERVALO_VERIFICACAO = 0.30
 PAUSA_GLOBAL = 3.0
@@ -41,6 +43,30 @@ CAMINHO_DASHBOARDS = "/public/dashboards"
 CAMINHO_GESTAO = "/public/dashboards/gestao-operacional"
 ARQUIVO_DESTINO = "acompanhamento_separacao_v01.wcdf"
 ABRIR_OUTRA_GUIA_ARQUIVO_DESTINO = "Open in a new window"
+
+# ============================================================
+# CONFIGURAÇÕES DO DASHBOARD
+# ============================================================
+
+UNIDADE_DESTINO = "CWBII"
+CLIENTE_PARA_REMOVER = "MDLZ-MP"
+INTERVALO_ATUALIZACAO = "05 Minutos"
+DATA_BASE = "Agendamento"
+INCLUIR_BACKLOG = "SIM"
+
+# Altere os horários conforme necessário.
+# Também podem ser definidos por variáveis de ambiente.
+HORA_INICIAL = os.getenv(
+    "PENTAHO_HORA_INICIAL",
+    "31/07/2026 14:00:00",
+)
+
+HORA_FINAL = os.getenv(
+    "PENTAHO_HORA_FINAL",
+    "31/07/2026 21:59:59",
+)
+
+BOTAO_APLICAR_FILTRO = "Aplicar Filtro (Todos)"
 
 
 # ============================================================
@@ -1138,6 +1164,1320 @@ def abrir_arquivo(nome_arquivo: str) -> None:
     )
 
 
+
+# ============================================================
+# AUTOMAÇÃO DOS FILTROS DO DASHBOARD
+# ============================================================
+
+SCRIPT_LOCALIZAR_TEXTO_EXATO = r"""
+const procurado = String(arguments[0] || "");
+
+function normalizar(texto) {
+    return String(texto || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+}
+
+function visivel(elemento) {
+    if (!elemento) {
+        return false;
+    }
+
+    const estilo = window.getComputedStyle(elemento);
+    const caixa = elemento.getBoundingClientRect();
+
+    return (
+        estilo.display !== "none" &&
+        estilo.visibility !== "hidden" &&
+        Number(estilo.opacity || 1) !== 0 &&
+        caixa.width > 0 &&
+        caixa.height > 0
+    );
+}
+
+const alvo = normalizar(procurado);
+const elementos = Array.from(
+    document.querySelectorAll("body *")
+).filter((elemento) => {
+    return (
+        visivel(elemento) &&
+        normalizar(elemento.textContent) === alvo
+    );
+});
+
+if (!elementos.length) {
+    return null;
+}
+
+function pontuar(elemento) {
+    let pontos = 0;
+    let atual = elemento;
+
+    for (let nivel = 0; nivel < 6 && atual; nivel += 1) {
+        const papel = normalizar(
+            atual.getAttribute &&
+            atual.getAttribute("role")
+        );
+
+        const classes = normalizar(
+            atual.className
+        );
+
+        if (
+            papel === "option" ||
+            papel === "menuitem" ||
+            papel === "listitem"
+        ) {
+            pontos += 100;
+        }
+
+        if (
+            classes.includes("option") ||
+            classes.includes("result") ||
+            classes.includes("menu-item") ||
+            classes.includes("list-item") ||
+            classes.includes("dropdown-item")
+        ) {
+            pontos += 70;
+        }
+
+        if (
+            atual.querySelector &&
+            atual.querySelector(
+                'input[type="radio"], input[type="checkbox"]'
+            )
+        ) {
+            pontos += 90;
+        }
+
+        if (
+            atual.tagName === "BUTTON" ||
+            atual.tagName === "A" ||
+            atual.tagName === "LABEL"
+        ) {
+            pontos += 60;
+        }
+
+        if (
+            window.getComputedStyle(atual).cursor === "pointer"
+        ) {
+            pontos += 30;
+        }
+
+        atual = atual.parentElement;
+    }
+
+    // Prefere o elemento mais específico.
+    pontos -= elemento.children.length * 2;
+
+    return pontos;
+}
+
+elementos.sort(
+    (a, b) => pontuar(b) - pontuar(a)
+);
+
+let escolhido = elementos[0];
+let atual = escolhido;
+
+for (let nivel = 0; nivel < 6 && atual; nivel += 1) {
+    const papel = normalizar(
+        atual.getAttribute &&
+        atual.getAttribute("role")
+    );
+
+    const classes = normalizar(
+        atual.className
+    );
+
+    const possuiMarcador = Boolean(
+        atual.querySelector &&
+        atual.querySelector(
+            'input[type="radio"], input[type="checkbox"]'
+        )
+    );
+
+    if (
+        possuiMarcador ||
+        papel === "option" ||
+        papel === "menuitem" ||
+        atual.tagName === "BUTTON" ||
+        atual.tagName === "A" ||
+        atual.tagName === "LABEL" ||
+        classes.includes("option") ||
+        classes.includes("dropdown-item") ||
+        classes.includes("menu-item")
+    ) {
+        escolhido = atual;
+        break;
+    }
+
+    atual = atual.parentElement;
+}
+
+return escolhido;
+"""
+
+
+SCRIPT_LOCALIZAR_CONTROLE_POR_ROTULO = r"""
+const rotuloProcurado = String(arguments[0] || "");
+
+function normalizar(texto) {
+    return String(texto || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+}
+
+function visivel(elemento) {
+    if (!elemento) {
+        return false;
+    }
+
+    const estilo = window.getComputedStyle(elemento);
+    const caixa = elemento.getBoundingClientRect();
+
+    return (
+        estilo.display !== "none" &&
+        estilo.visibility !== "hidden" &&
+        Number(estilo.opacity || 1) !== 0 &&
+        caixa.width > 0 &&
+        caixa.height > 0
+    );
+}
+
+function pontuarControle(elemento) {
+    if (!visivel(elemento)) {
+        return -1000;
+    }
+
+    let pontos = 0;
+    const tag = elemento.tagName;
+    const papel = normalizar(
+        elemento.getAttribute("role")
+    );
+
+    const classes = normalizar(
+        elemento.className
+    );
+
+    if (
+        tag === "INPUT" ||
+        tag === "SELECT" ||
+        tag === "TEXTAREA"
+    ) {
+        pontos += 150;
+    }
+
+    if (papel === "combobox") {
+        pontos += 140;
+    }
+
+    if (
+        elemento.getAttribute("aria-haspopup") === "listbox"
+    ) {
+        pontos += 120;
+    }
+
+    if (
+        classes.includes("select2") ||
+        classes.includes("chosen") ||
+        classes.includes("dropdown") ||
+        classes.includes("select")
+    ) {
+        pontos += 80;
+    }
+
+    if (
+        window.getComputedStyle(elemento).cursor === "pointer"
+    ) {
+        pontos += 40;
+    }
+
+    const caixa = elemento.getBoundingClientRect();
+
+    if (
+        caixa.width >= 80 &&
+        caixa.height >= 20 &&
+        caixa.height <= 90
+    ) {
+        pontos += 30;
+    }
+
+    return pontos;
+}
+
+const alvo = normalizar(rotuloProcurado);
+
+const rotulos = Array.from(
+    document.querySelectorAll(
+        "label, span, div, p, td, th"
+    )
+).filter((elemento) => {
+    return (
+        visivel(elemento) &&
+        normalizar(elemento.textContent) === alvo
+    );
+});
+
+for (const rotulo of rotulos) {
+    let ancestral = rotulo.parentElement;
+
+    for (
+        let nivel = 0;
+        nivel < 7 && ancestral;
+        nivel += 1
+    ) {
+        const candidatos = Array.from(
+            ancestral.querySelectorAll(
+                [
+                    "input:not([type='hidden'])",
+                    "select",
+                    "textarea",
+                    "[role='combobox']",
+                    "[aria-haspopup='listbox']",
+                    ".select2-container",
+                    ".chosen-container",
+                    ".dropdown-toggle",
+                    "[class*='select']",
+                    "[class*='dropdown']"
+                ].join(",")
+            )
+        ).filter((elemento) => {
+            return (
+                elemento !== rotulo &&
+                visivel(elemento)
+            );
+        });
+
+        candidatos.sort(
+            (a, b) => (
+                pontuarControle(b) -
+                pontuarControle(a)
+            )
+        );
+
+        if (
+            candidatos.length &&
+            pontuarControle(candidatos[0]) > 0
+        ) {
+            return candidatos[0];
+        }
+
+        // Tenta o próximo irmão do rótulo.
+        let irmao = rotulo.nextElementSibling;
+
+        while (irmao) {
+            if (
+                visivel(irmao) &&
+                pontuarControle(irmao) > 0
+            ) {
+                return irmao;
+            }
+
+            const interno = irmao.querySelector &&
+                irmao.querySelector(
+                    [
+                        "input:not([type='hidden'])",
+                        "select",
+                        "textarea",
+                        "[role='combobox']",
+                        "[aria-haspopup='listbox']",
+                        ".select2-container",
+                        ".chosen-container",
+                        ".dropdown-toggle",
+                        "[class*='select']",
+                        "[class*='dropdown']"
+                    ].join(",")
+                );
+
+            if (
+                interno &&
+                visivel(interno)
+            ) {
+                return interno;
+            }
+
+            irmao = irmao.nextElementSibling;
+        }
+
+        ancestral = ancestral.parentElement;
+    }
+}
+
+return null;
+"""
+
+
+SCRIPT_DEFINIR_CHECKBOX_POR_TEXTO = r"""
+const textoProcurado = String(arguments[0] || "");
+const estadoDesejado = Boolean(arguments[1]);
+
+function normalizar(texto) {
+    return String(texto || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+}
+
+function visivel(elemento) {
+    if (!elemento) {
+        return false;
+    }
+
+    const estilo = window.getComputedStyle(elemento);
+    const caixa = elemento.getBoundingClientRect();
+
+    return (
+        estilo.display !== "none" &&
+        estilo.visibility !== "hidden" &&
+        Number(estilo.opacity || 1) !== 0 &&
+        caixa.width > 0 &&
+        caixa.height > 0
+    );
+}
+
+const alvo = normalizar(textoProcurado);
+
+const textos = Array.from(
+    document.querySelectorAll("body *")
+).filter((elemento) => {
+    return (
+        visivel(elemento) &&
+        normalizar(elemento.textContent) === alvo
+    );
+});
+
+for (const texto of textos) {
+    let linha = texto;
+
+    for (
+        let nivel = 0;
+        nivel < 7 && linha;
+        nivel += 1
+    ) {
+        const checkbox = linha.querySelector &&
+            linha.querySelector(
+                'input[type="checkbox"]'
+            );
+
+        if (checkbox && visivel(linha)) {
+            if (
+                Boolean(checkbox.checked) !==
+                estadoDesejado
+            ) {
+                checkbox.click();
+
+                checkbox.dispatchEvent(
+                    new Event(
+                        "input",
+                        { bubbles: true }
+                    )
+                );
+
+                checkbox.dispatchEvent(
+                    new Event(
+                        "change",
+                        { bubbles: true }
+                    )
+                );
+            }
+
+            return true;
+        }
+
+        linha = linha.parentElement;
+    }
+}
+
+return false;
+"""
+
+
+def procurar_resultado_script_recursivamente(
+    script: str,
+    argumentos: tuple,
+    profundidade: int = 0,
+):
+    """
+    Executa um script na página principal e dentro de iframes.
+
+    Quando encontra um elemento, mantém o driver no frame correto.
+    """
+    if profundidade > 10:
+        return None
+
+    try:
+        resultado = driver.execute_script(
+            script,
+            *argumentos,
+        )
+
+        if resultado:
+            return resultado
+
+    except (
+        JavascriptException,
+        WebDriverException,
+    ):
+        pass
+
+    try:
+        frames = driver.find_elements(
+            By.CSS_SELECTOR,
+            "iframe, frame",
+        )
+
+    except WebDriverException:
+        return None
+
+    for frame in frames:
+        entrou = False
+
+        try:
+            driver.switch_to.frame(frame)
+            entrou = True
+
+            resultado = (
+                procurar_resultado_script_recursivamente(
+                    script,
+                    argumentos,
+                    profundidade + 1,
+                )
+            )
+
+            if resultado:
+                return resultado
+
+        except (
+            NoSuchFrameException,
+            StaleElementReferenceException,
+            WebDriverException,
+        ):
+            pass
+
+        if entrou:
+            try:
+                driver.switch_to.parent_frame()
+            except WebDriverException:
+                driver.switch_to.default_content()
+
+    return None
+
+
+def esperar_resultado_script(
+    script: str,
+    *argumentos,
+    timeout: int = TIMEOUT,
+    descricao: str = "elemento",
+):
+    """Aguarda um script retornar um elemento ou valor válido."""
+    limite = time.monotonic() + timeout
+
+    while time.monotonic() < limite:
+        try:
+            driver.switch_to.default_content()
+
+            resultado = (
+                procurar_resultado_script_recursivamente(
+                    script,
+                    argumentos,
+                )
+            )
+
+            if resultado:
+                logger.info(
+                    "Elemento encontrado por script: %s",
+                    descricao,
+                )
+
+                return resultado
+
+        except WebDriverException:
+            pass
+
+        time.sleep(INTERVALO_VERIFICACAO)
+
+    try:
+        driver.switch_to.default_content()
+    except WebDriverException:
+        pass
+
+    raise TimeoutException(
+        f"Não foi possível encontrar: {descricao}"
+    )
+
+
+def esperar_dashboard_carregar() -> None:
+    """Aguarda os controles principais do dashboard aparecerem."""
+    atualizar_status(
+        "Aguardando o dashboard carregar..."
+    )
+
+    esperar_resultado_script(
+        SCRIPT_LOCALIZAR_CONTROLE_POR_ROTULO,
+        "Selecione a unidade",
+        timeout=TIMEOUT,
+        descricao="campo Selecione a unidade",
+    )
+
+    pausa_adicional(
+        "Carregamento do dashboard"
+    )
+
+
+def localizar_controle_por_rotulo(
+    rotulo: str,
+):
+    """Localiza um campo usando o texto apresentado acima dele."""
+    return esperar_resultado_script(
+        SCRIPT_LOCALIZAR_CONTROLE_POR_ROTULO,
+        rotulo,
+        timeout=TIMEOUT,
+        descricao=f"campo {rotulo}",
+    )
+
+
+def localizar_texto_exato_visivel(
+    texto: str,
+    timeout: int = TIMEOUT,
+):
+    """Localiza uma opção ou botão pelo texto exato visível."""
+    return esperar_resultado_script(
+        SCRIPT_LOCALIZAR_TEXTO_EXATO,
+        texto,
+        timeout=timeout,
+        descricao=f"texto {texto}",
+    )
+
+
+def selecionar_opcao_dropdown(
+    rotulo: str,
+    opcao: str,
+) -> None:
+    """
+    Abre um campo de seleção e escolhe uma opção pelo texto.
+
+    Funciona com os seletores customizados observados no dashboard.
+    """
+    atualizar_status(
+        f"Configurando {rotulo}: {opcao}..."
+    )
+
+    controle = localizar_controle_por_rotulo(
+        rotulo
+    )
+
+    clicar(controle)
+    time.sleep(0.6)
+
+    elemento_opcao = localizar_texto_exato_visivel(
+        opcao,
+        timeout=TIMEOUT,
+    )
+
+    clicar(elemento_opcao)
+    time.sleep(0.7)
+
+    logger.info(
+        "Opção selecionada: %s = %s",
+        rotulo,
+        opcao,
+    )
+
+
+def localizar_linha_opcao_multiselect(
+    opcao: str,
+):
+    """
+    Localiza uma opção do multiselect pelo atributo title.
+
+    O componente deste dashboard não utiliza um input checkbox
+    tradicional. Cada item possui a seguinte estrutura:
+
+        div.filter-item-body
+            div.filter-item-selection-icon
+            span.filter-item-only-this
+            div.filter-item-label[title="MDLZ-MP"]
+    """
+    return esperar_elemento(
+        [
+            (
+                By.CSS_SELECTOR,
+                (
+                    "div.filter-item-label"
+                    f"[title='{opcao}']"
+                ),
+            ),
+            (
+                By.XPATH,
+                (
+                    "//div["
+                    "contains("
+                    "concat(' ', normalize-space(@class), ' '),"
+                    "' filter-item-label '"
+                    ") "
+                    f"and @title='{opcao}' "
+                    f"and normalize-space()='{opcao}'"
+                    "]"
+                ),
+            ),
+        ],
+        clicavel=False,
+        timeout=TIMEOUT,
+        descricao=f"opção do cliente {opcao}",
+    )
+
+
+def obter_corpo_opcao_multiselect(
+    rotulo_opcao,
+):
+    """Retorna a linha filter-item-body da opção."""
+    try:
+        return rotulo_opcao.find_element(
+            By.XPATH,
+            (
+                "./ancestor::div["
+                "contains("
+                "concat(' ', normalize-space(@class), ' '),"
+                "' filter-item-body '"
+                ")"
+                "][1]"
+            ),
+        )
+
+    except NoSuchElementException as erro:
+        raise TimeoutException(
+            "Não foi possível localizar a linha da opção "
+            f"{rotulo_opcao.text!r}."
+        ) from erro
+
+
+def obter_icone_selecao_multiselect(
+    corpo_opcao,
+):
+    """Localiza o ícone usado para marcar ou desmarcar a opção."""
+    try:
+        return corpo_opcao.find_element(
+            By.CSS_SELECTOR,
+            ".filter-item-selection-icon",
+        )
+
+    except NoSuchElementException as erro:
+        raise TimeoutException(
+            "O ícone de seleção do cliente não foi encontrado."
+        ) from erro
+
+
+def localizar_botao_apply_multiselect(
+    timeout: int = TIMEOUT,
+):
+    """
+    Aguarda o botão Apply ficar habilitado.
+
+    Quando uma alteração é realizada, o componente adiciona
+    a classe 'dirty' ao botão:
+
+        button.filter-btn-apply.dirty
+    """
+    return esperar_elemento(
+        [
+            (
+                By.CSS_SELECTOR,
+                (
+                    "button.filter-btn-apply"
+                    ".dirty:not([disabled])"
+                ),
+            ),
+            (
+                By.XPATH,
+                (
+                    "//button["
+                    "contains("
+                    "concat(' ', normalize-space(@class), ' '),"
+                    "' filter-btn-apply '"
+                    ") "
+                    "and contains("
+                    "concat(' ', normalize-space(@class), ' '),"
+                    "' dirty '"
+                    ") "
+                    "and not(@disabled) "
+                    "and normalize-space()='Apply'"
+                    "]"
+                ),
+            ),
+        ],
+        clicavel=True,
+        timeout=timeout,
+        descricao="botão Apply habilitado do multiselect",
+    )
+
+
+def aguardar_multiselect_fechar(
+    timeout: int = 15,
+) -> None:
+    """
+    Aguarda o painel do multiselect fechar após o Apply.
+
+    A ausência dessa confirmação não interrompe o restante
+    da automação, pois algumas versões mantêm o painel aberto.
+    """
+    try:
+        WebDriverWait(
+            driver,
+            timeout,
+            poll_frequency=INTERVALO_VERIFICACAO,
+        ).until(
+            lambda navegador: not any(
+                elemento.is_displayed()
+                for elemento in navegador.find_elements(
+                    By.CSS_SELECTOR,
+                    "button.filter-btn-apply",
+                )
+            )
+        )
+
+    except (
+        TimeoutException,
+        StaleElementReferenceException,
+        WebDriverException,
+    ):
+        logger.warning(
+            "O painel de clientes não confirmou o fechamento, "
+            "mas o botão Apply já foi acionado."
+        )
+
+
+def desmarcar_opcao_multiselect(
+    rotulo: str,
+    opcao: str,
+) -> None:
+    """
+    Abre o seletor de clientes, desmarca somente a opção informada
+    e clica no botão Apply habilitado.
+
+    Esta implementação é específica para o DOM observado:
+
+        div.filter-item-label[title="MDLZ-MP"]
+        div.filter-item-selection-icon
+        button.filter-btn-apply.dirty
+    """
+    atualizar_status(
+        f"Abrindo {rotulo}..."
+    )
+
+    controle = localizar_controle_por_rotulo(
+        rotulo
+    )
+
+    clicar(controle)
+
+    # Aguarda a animação de abertura do painel.
+    time.sleep(0.8)
+
+    atualizar_status(
+        f"Localizando somente o cliente {opcao}..."
+    )
+
+    rotulo_opcao = localizar_linha_opcao_multiselect(
+        opcao
+    )
+
+    corpo_opcao = obter_corpo_opcao_multiselect(
+        rotulo_opcao
+    )
+
+    icone_selecao = obter_icone_selecao_multiselect(
+        corpo_opcao
+    )
+
+    atualizar_status(
+        f"Desmarcando somente {opcao}..."
+    )
+
+    # Clica diretamente no ícone azul de seleção.
+    # Não clica em "All", "Only" nem em MDLZ-PA.
+    clicar(icone_selecao)
+
+    # O botão Apply deve ganhar a classe "dirty" depois da mudança.
+    atualizar_status(
+        "Aguardando o botão Apply ser habilitado..."
+    )
+
+    botao_apply = localizar_botao_apply_multiselect(
+        timeout=TIMEOUT
+    )
+
+    atualizar_status(
+        "Aplicando a remoção de MDLZ-MP..."
+    )
+
+    clicar(botao_apply)
+
+    aguardar_multiselect_fechar(
+        timeout=15
+    )
+
+    time.sleep(0.8)
+
+    logger.info(
+        "Cliente desmarcado e aplicado com sucesso: %s",
+        opcao,
+    )
+
+    pausa_adicional(
+        f"Remoção do cliente {opcao}"
+    )
+
+
+
+def validar_data_hora(
+    valor: str,
+    nome_campo: str,
+) -> str:
+    """
+    Valida datas no formato DD/MM/AAAA HH:MM:SS.
+
+    Retorna o mesmo valor normalizado.
+    """
+    valor_normalizado = valor.strip()
+
+    try:
+        data = datetime.strptime(
+            valor_normalizado,
+            "%d/%m/%Y %H:%M:%S",
+        )
+
+    except ValueError as erro:
+        raise ValueError(
+            f"{nome_campo} deve usar o formato "
+            "DD/MM/AAAA HH:MM:SS. "
+            f"Valor recebido: {valor!r}"
+        ) from erro
+
+    return data.strftime(
+        "%d/%m/%Y %H:%M:%S"
+    )
+
+
+def localizar_input_data_hora(
+    painel_id: str,
+    input_id: str,
+    descricao: str,
+):
+    """
+    Localiza o input de data usando os IDs exatos do dashboard.
+
+    Exemplos conhecidos:
+
+        #panelFilterDataInicial
+        #render_ticDataInicial
+
+        #panelFilterDataFinal
+        #render_ticDataFinal
+
+    A busca continua funcionando caso o relatório esteja dentro
+    de um iframe.
+    """
+    return esperar_elemento(
+        [
+            (
+                By.CSS_SELECTOR,
+                (
+                    f"div#{painel_id} "
+                    f"input#{input_id}"
+                ),
+            ),
+            (
+                By.CSS_SELECTOR,
+                (
+                    f"#{painel_id} "
+                    f"input#{input_id}"
+                ),
+            ),
+            (
+                By.XPATH,
+                (
+                    f"//div[@id='{painel_id}']"
+                    f"//input[@id='{input_id}']"
+                ),
+            ),
+            (
+                By.CSS_SELECTOR,
+                (
+                    f"#{painel_id} "
+                    "input[type='text']"
+                ),
+            ),
+        ],
+        clicavel=True,
+        timeout=TIMEOUT,
+        descricao=descricao,
+    )
+
+
+def definir_valor_input_com_eventos(
+    campo,
+    valor: str,
+) -> None:
+    """
+    Define o valor do input e dispara os eventos usados pelo dashboard.
+
+    Primeiro tenta digitação real. Depois confirma o valor e usa
+    JavaScript apenas como fallback.
+    """
+    rolar_ate_elemento(
+        campo
+    )
+
+    clicar(
+        campo
+    )
+
+    try:
+        campo.send_keys(
+            Keys.CONTROL,
+            "a",
+        )
+
+        campo.send_keys(
+            Keys.BACKSPACE
+        )
+
+        campo.send_keys(
+            valor
+        )
+
+        # TAB costuma confirmar o valor em componentes de data.
+        campo.send_keys(
+            Keys.TAB
+        )
+
+    except (
+        StaleElementReferenceException,
+        WebDriverException,
+    ):
+        pass
+
+    time.sleep(0.4)
+
+    try:
+        valor_atual = (
+            campo.get_attribute("value") or ""
+        ).strip()
+
+    except (
+        StaleElementReferenceException,
+        WebDriverException,
+    ):
+        valor_atual = ""
+
+    if valor_atual != valor:
+        driver.execute_script(
+            """
+            const campo = arguments[0];
+            const valor = arguments[1];
+
+            campo.focus();
+
+            const descritor = Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype,
+                "value"
+            );
+
+            if (descritor && descritor.set) {
+                descritor.set.call(campo, valor);
+            } else {
+                campo.value = valor;
+            }
+
+            campo.dispatchEvent(
+                new Event(
+                    "input",
+                    { bubbles: true }
+                )
+            );
+
+            campo.dispatchEvent(
+                new Event(
+                    "change",
+                    { bubbles: true }
+                )
+            );
+
+            campo.dispatchEvent(
+                new KeyboardEvent(
+                    "keyup",
+                    {
+                        bubbles: true,
+                        key: "Tab"
+                    }
+                )
+            );
+
+            campo.blur();
+            """,
+            campo,
+            valor,
+        )
+
+    else:
+        # Mesmo quando a digitação funcionar, garante que o Pentaho
+        # receba os eventos input/change/blur.
+        driver.execute_script(
+            """
+            const campo = arguments[0];
+
+            campo.dispatchEvent(
+                new Event(
+                    "input",
+                    { bubbles: true }
+                )
+            );
+
+            campo.dispatchEvent(
+                new Event(
+                    "change",
+                    { bubbles: true }
+                )
+            );
+
+            campo.dispatchEvent(
+                new Event(
+                    "blur",
+                    { bubbles: true }
+                )
+            );
+            """,
+            campo,
+        )
+
+    time.sleep(0.5)
+
+
+def confirmar_valor_input(
+    painel_id: str,
+    input_id: str,
+    valor_esperado: str,
+    descricao: str,
+) -> None:
+    """
+    Localiza novamente o campo e confirma que o valor foi aplicado.
+
+    O DOM do dashboard pode ser recriado após os eventos.
+    """
+    def valor_foi_aplicado(_):
+        try:
+            campo = localizar_input_data_hora(
+                painel_id=painel_id,
+                input_id=input_id,
+                descricao=descricao,
+            )
+
+            valor_atual = (
+                campo.get_attribute("value") or ""
+            ).strip()
+
+            if valor_atual == valor_esperado:
+                return campo
+
+        except (
+            TimeoutException,
+            StaleElementReferenceException,
+            WebDriverException,
+        ):
+            return False
+
+        return False
+
+    WebDriverWait(
+        driver,
+        15,
+        poll_frequency=INTERVALO_VERIFICACAO,
+    ).until(
+        valor_foi_aplicado
+    )
+
+
+def preencher_data_hora_por_id(
+    *,
+    painel_id: str,
+    input_id: str,
+    valor: str,
+    descricao: str,
+) -> None:
+    """
+    Preenche exclusivamente o input indicado por painel_id/input_id.
+
+    Isso impede que o valor seja digitado no seletor da unidade CWBII
+    ou em qualquer outro controle próximo.
+    """
+    valor_validado = validar_data_hora(
+        valor,
+        descricao,
+    )
+
+    atualizar_status(
+        f"Preenchendo {descricao}: {valor_validado}..."
+    )
+
+    campo = localizar_input_data_hora(
+        painel_id=painel_id,
+        input_id=input_id,
+        descricao=descricao,
+    )
+
+    logger.info(
+        "Campo de data localizado: painel=%s | input=%s",
+        painel_id,
+        input_id,
+    )
+
+    definir_valor_input_com_eventos(
+        campo,
+        valor_validado,
+    )
+
+    confirmar_valor_input(
+        painel_id=painel_id,
+        input_id=input_id,
+        valor_esperado=valor_validado,
+        descricao=descricao,
+    )
+
+    logger.info(
+        "%s preenchida corretamente: %s",
+        descricao,
+        valor_validado,
+    )
+
+
+def horainicial(
+    valor: str,
+) -> None:
+    """
+    Define exclusivamente o campo Data/Hora inicial.
+
+    HTML esperado:
+
+        <div id="panelFilterDataInicial">
+            <input
+                id="render_ticDataInicial"
+                name="render_ticDataInicial"
+            >
+        </div>
+    """
+    preencher_data_hora_por_id(
+        painel_id="panelFilterDataInicial",
+        input_id="render_ticDataInicial",
+        valor=valor,
+        descricao="Data/Hora inicial",
+    )
+
+
+def horafinal(
+    valor: str,
+) -> None:
+    """
+    Define exclusivamente o campo Data/Hora final.
+
+    HTML esperado:
+
+        <div id="panelFilterDataFinal">
+            <input
+                id="render_ticDataFinal"
+                name="render_ticDataFinal"
+            >
+        </div>
+    """
+    preencher_data_hora_por_id(
+        painel_id="panelFilterDataFinal",
+        input_id="render_ticDataFinal",
+        valor=valor,
+        descricao="Data/Hora final",
+    )
+
+
+
+def aplicar_filtro_todos() -> None:
+    """Clica no botão Aplicar Filtro (Todos)."""
+    atualizar_status(
+        "Aplicando o filtro de todos..."
+    )
+
+    botao = localizar_texto_exato_visivel(
+        BOTAO_APLICAR_FILTRO,
+        timeout=TIMEOUT,
+    )
+
+    clicar(botao)
+
+    pausa_adicional(
+        "Aplicação do filtro"
+    )
+
+
+def configurar_dashboard(
+    hora_inicial: str,
+    hora_final: str,
+) -> None:
+    """
+    Configura todos os filtros solicitados no relatório.
+
+    Ordem:
+    1. Unidade: CWBII.
+    2. Remove cliente MDLZ-MP.
+    3. Intervalo: 05 Minutos.
+    4. Data base: Agendamento.
+    5. Backlog: SIM.
+    6. Data/Hora inicial.
+    7. Data/Hora final.
+    8. Aplicar Filtro (Todos).
+    """
+    esperar_dashboard_carregar()
+
+    selecionar_opcao_dropdown(
+        "Selecione a unidade",
+        UNIDADE_DESTINO,
+    )
+
+    desmarcar_opcao_multiselect(
+        "Selecione o(s) cliente(s)",
+        CLIENTE_PARA_REMOVER,
+    )
+
+    selecionar_opcao_dropdown(
+        "Selecione o intervalo de atualização",
+        INTERVALO_ATUALIZACAO,
+    )
+
+    selecionar_opcao_dropdown(
+        "Selecione a data base",
+        DATA_BASE,
+    )
+
+    selecionar_opcao_dropdown(
+        "Incluir backlog",
+        INCLUIR_BACKLOG,
+    )
+
+    horainicial(
+        hora_inicial
+    )
+
+    horafinal(
+        hora_final
+    )
+
+    aplicar_filtro_todos()
+
 # ============================================================
 # PROCESSO COMPLETO
 # ============================================================
@@ -1194,9 +2534,12 @@ def executar_processo() -> None:
             nome_arquivo=ARQUIVO_DESTINO,
             nome_acao=ABRIR_OUTRA_GUIA_ARQUIVO_DESTINO,
         )
-        time.sleep(3)
 
-        pg.press("f11")  # Ativa o modo de tela cheia do Chrome
+        # Configura automaticamente os filtros do dashboard.
+        configurar_dashboard(
+            hora_inicial=HORA_INICIAL,
+            hora_final=HORA_FINAL,
+        )
 
         logger.info("Processo concluído com sucesso.")
 
