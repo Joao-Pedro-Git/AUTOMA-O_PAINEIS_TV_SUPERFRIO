@@ -6,7 +6,7 @@ import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
-
+import pyautogui as pg
 
 from selenium import webdriver
 from selenium.common.exceptions import (
@@ -54,17 +54,27 @@ INTERVALO_ATUALIZACAO = "05 Minutos"
 DATA_BASE = "Agendamento"
 INCLUIR_BACKLOG = "SIM"
 
-# Altere os horários conforme necessário.
-# Também podem ser definidos por variáveis de ambiente.
+
+def montar_data_hora_padrao(horario: str) -> str:
+    """Monta DD/MM/AAAA HH:MM:SS usando a data atual."""
+    data_atual = datetime.now().strftime("%d/%m/%Y")
+    return f"{data_atual} {horario}"
+
+
+NOME_AGENDAMENTO = os.getenv(
+    "PENTAHO_NOME_AGENDAMENTO",
+    "EXECUCAO_MANUAL",
+).strip()
+
 HORA_INICIAL = os.getenv(
     "PENTAHO_HORA_INICIAL",
-    "31/07/2026 14:00:00",
-)
+    montar_data_hora_padrao("05:00:00"),
+).strip()
 
 HORA_FINAL = os.getenv(
     "PENTAHO_HORA_FINAL",
-    "31/07/2026 21:59:59",
-)
+    montar_data_hora_padrao("13:45:00"),
+).strip()
 
 BOTAO_APLICAR_FILTRO = "Aplicar Filtro (Todos)"
 
@@ -123,6 +133,9 @@ def concluir_interface() -> None:
         return
 
     status_variavel.set("Processo concluído com sucesso.")
+    time.sleep(2.5)
+    pg.press("f11")
+    time.sleep(1.5)
     contador_variavel.set("Concluído")
     janela.after(2500, janela.destroy)
 
@@ -2535,6 +2548,13 @@ def executar_processo() -> None:
             nome_acao=ABRIR_OUTRA_GUIA_ARQUIVO_DESTINO,
         )
 
+        logger.info(
+            "Agendamento recebido: %s | início=%s | fim=%s",
+            NOME_AGENDAMENTO,
+            HORA_INICIAL,
+            HORA_FINAL,
+        )
+
         # Configura automaticamente os filtros do dashboard.
         configurar_dashboard(
             hora_inicial=HORA_INICIAL,
@@ -2598,6 +2618,31 @@ def validar_configuracao() -> bool:
             "Defina PENTAHO_SENHA ou altere SENHA no arquivo.",
         )
         return False
+
+    try:
+        validar_data_hora(
+            HORA_INICIAL,
+            "Data/Hora inicial",
+        )
+
+        validar_data_hora(
+            HORA_FINAL,
+            "Data/Hora final",
+        )
+
+    except ValueError as erro:
+        messagebox.showwarning(
+            "Horários inválidos",
+            str(erro),
+        )
+        return False
+
+    logger.info(
+        "Configuração validada: agendamento=%s | início=%s | fim=%s",
+        NOME_AGENDAMENTO,
+        HORA_INICIAL,
+        HORA_FINAL,
+    )
 
     return True
 
