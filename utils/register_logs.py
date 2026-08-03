@@ -1,35 +1,58 @@
 """
-Registro das execuções da automação em logs_tvs.txt.
+Registro das execuções no arquivo logs_tvs.txt.
 
-Não abre o Bloco de Notas e não usa interface gráfica.
+No código-fonte:
+    salva na raiz acima de utils.
+
+No executável:
+    salva ao lado de LoopAtualizar.exe.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import sys
+
 from datetime import datetime
 from pathlib import Path
 
 
-PASTA_UTILS = Path(__file__).resolve().parent
-PASTA_PROJETO = PASTA_UTILS.parent
+def obter_pasta_projeto() -> Path:
+    """Retorna a pasta permanente da aplicação."""
+    if getattr(
+        sys,
+        "frozen",
+        False,
+    ):
+        return Path(
+            sys.executable
+        ).resolve().parent
 
+    return Path(
+        __file__
+    ).resolve().parent.parent
+
+
+PASTA_PROJETO = obter_pasta_projeto()
 ARQUIVO_LOG = PASTA_PROJETO / "logs_tvs.txt"
-FORMATO_DATA_HORA = "%d/%m/%Y %H:%M:%S"
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(
+    __name__
+)
 
 
 def registrar_logs(
     mensagem: str = "Atualizando as TVs",
 ) -> bool:
     """Acrescenta uma linha ao arquivo logs_tvs.txt."""
-    momento_atual = datetime.now().strftime(
-        FORMATO_DATA_HORA
+    data_hora = datetime.now().strftime(
+        "%d/%m/%Y %H:%M:%S"
     )
 
-    texto_final = f"{mensagem} {momento_atual}"
+    linha = (
+        f"{mensagem} {data_hora}"
+    )
 
     try:
         ARQUIVO_LOG.parent.mkdir(
@@ -43,31 +66,35 @@ def registrar_logs(
             newline="",
         ) as arquivo:
             arquivo.write(
-                texto_final + "\n"
+                linha + "\n"
             )
+
             arquivo.flush()
-            os.fsync(
-                arquivo.fileno()
-            )
+
+            try:
+                os.fsync(
+                    arquivo.fileno()
+                )
+            except OSError:
+                pass
 
         logger.info(
             "Log registrado: %s",
-            texto_final,
+            linha,
         )
 
         return True
 
     except OSError:
         logger.exception(
-            "Não foi possível registrar o log em %s.",
+            "Não foi possível registrar em %s.",
             ARQUIVO_LOG,
         )
+
         return False
 
 
-def main() -> int:
-    return 0 if registrar_logs() else 1
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        0 if registrar_logs() else 1
+    )

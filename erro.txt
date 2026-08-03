@@ -1,0 +1,98 @@
+
+================================================================================
+DATA/HORA: 03/08/2026 13:54:28
+AGENDAMENTO: EXECUCAO_MANUAL
+ETAPA: Erro geral durante a automação
+TIPO: StaleElementReferenceException
+MENSAGEM: Message: stale element reference: stale element not found in the current frame
+  (Session info: chrome=150.0.7871.187); For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#staleelementreferenceexception
+Stacktrace:
+	chromedriver!GetHandleVerifier [0x7ff6119a0d25+155a5]
+	chromedriver!GetHandleVerifier [0x7ff6119a0d80+15600]
+	chromedriver!(No symbol) [0x7ff6114f594d]
+	chromedriver!(No symbol) [0x7ff6114fd8c1]
+	chromedriver!(No symbol) [0x7ff611500c1f]
+	chromedriver!(No symbol) [0x7ff61159f292]
+	chromedriver!(No symbol) [0x7ff6115791ca]
+	chromedriver!(No symbol) [0x7ff61159e01b]
+	chromedriver!(No symbol) [0x7ff611542e6c]
+	chromedriver!(No symbol) [0x7ff611543d93]
+	chromedriver!GetHandleVerifier [0x7ff611f86431+5facb1]
+	chromedriver!GetHandleVerifier [0x7ff611f80a9b+5f531b]
+	chromedriver!GetHandleVerifier [0x7ff611fa5865+61a0e5]
+	chromedriver!GetHandleVerifier [0x7ff6119bdace+3234e]
+	chromedriver!GetHandleVerifier [0x7ff6119c661c+3ae9c]
+	chromedriver!GetHandleVerifier [0x7ff6119aab74+1f3f4]
+	chromedriver!GetHandleVerifier [0x7ff6119aad04+1f584]
+	chromedriver!GetHandleVerifier [0x7ff61198d9d7+2257]
+	KERNEL32!BaseThreadInitThunk [0x7fffd724e957+17]
+	ntdll!RtlUserThreadStart [0x7fffd938ad6c+2c]
+
+HORA INICIAL: 03/08/2026 05:00:00
+HORA FINAL: 03/08/2026 13:45:00
+
+TRACEBACK:
+Traceback (most recent call last):
+  File "c:\Users\JOAO.PEREIRA\Downloads\Python\automacao-jp-gestao-operacional-pentaho\utils\gerar_relatorio.py", line 3246, in executar_processo
+    configurar_dashboard(
+    ~~~~~~~~~~~~~~~~~~~~^
+        hora_inicial=HORA_INICIAL,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+        hora_final=HORA_FINAL,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "c:\Users\JOAO.PEREIRA\Downloads\Python\automacao-jp-gestao-operacional-pentaho\utils\gerar_relatorio.py", line 3140, in configurar_dashboard
+    desmarcar_opcao_multiselect(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        "Selecione o(s) cliente(s)",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        CLIENTE_PARA_REMOVER,
+        ^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "c:\Users\JOAO.PEREIRA\Downloads\Python\automacao-jp-gestao-operacional-pentaho\utils\gerar_relatorio.py", line 2669, in desmarcar_opcao_multiselect
+    clicar(controle)
+    ~~~~~~^^^^^^^^^^
+  File "c:\Users\JOAO.PEREIRA\Downloads\Python\automacao-jp-gestao-operacional-pentaho\utils\gerar_relatorio.py", line 1052, in clicar
+    driver.execute_script(
+    ~~~~~~~~~~~~~~~~~~~~~^
+        """
+        ^^^
+    ...<18 lines>...
+        elemento,
+        ^^^^^^^^^
+    )
+    ^
+  File "C:\Users\JOAO.PEREIRA\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\selenium\webdriver\remote\webdriver.py", line 602, in execute_script
+    return self.execute(command, {"script": script, "args": converted_args})["value"]
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\JOAO.PEREIRA\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\selenium\webdriver\remote\webdriver.py", line 492, in execute
+    self.error_handler.check_response(response)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\JOAO.PEREIRA\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\selenium\webdriver\remote\errorhandler.py", line 232, in check_response
+    raise exception_class(message, screen, stacktrace)
+selenium.common.exceptions.StaleElementReferenceException: Message: stale element reference: stale element not found in the current frame
+  (Session info: chrome=150.0.7871.187); For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#staleelementreferenceexception
+Stacktrace:
+	chromedriver!GetHandleVerifier [0x7ff6119a0d25+155a5]
+	chromedriver!GetHandleVerifier [0x7ff6119a0d80+15600]
+	chromedriver!(No symbol) [0x7ff6114f594d]
+	chromedriver!(No symbol) [0x7ff6114fd8c1]
+	chromedriver!(No symbol) [0x7ff611500c1f]
+	chromedriver!(No symbol) [0x7ff61159f292]
+	chromedriver!(No symbol) [0x7ff6115791ca]
+	chromedriver!(No symbol) [0x7ff61159e01b]
+	chromedriver!(No symbol) [0x7ff611542e6c]
+	chromedriver!(No symbol) [0x7ff611543d93]
+	chromedriver!GetHandleVerifier [0x7ff611f86431+5facb1]
+	chromedriver!GetHandleVerifier [0x7ff611f80a9b+5f531b]
+	chromedriver!GetHandleVerifier [0x7ff611fa5865+61a0e5]
+	chromedriver!GetHandleVerifier [0x7ff6119bdace+3234e]
+	chromedriver!GetHandleVerifier [0x7ff6119c661c+3ae9c]
+	chromedriver!GetHandleVerifier [0x7ff6119aab74+1f3f4]
+	chromedriver!GetHandleVerifier [0x7ff6119aad04+1f584]
+	chromedriver!GetHandleVerifier [0x7ff61198d9d7+2257]
+	KERNEL32!BaseThreadInitThunk [0x7fffd724e957+17]
+	ntdll!RtlUserThreadStart [0x7fffd938ad6c+2c]
+================================================================================

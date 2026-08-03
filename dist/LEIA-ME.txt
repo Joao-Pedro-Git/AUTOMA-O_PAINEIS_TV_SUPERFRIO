@@ -1,0 +1,6 @@
+AUTOMAÇÃO PENTAHO
+
+Mantenha LoopAtualizar.exe e gerar_relatorio.exe na mesma pasta.
+Inicie somente LoopAtualizar.exe.
+
+logs_tvs.txt, erro.txt e diagnosticos permanecem nesta pasta.

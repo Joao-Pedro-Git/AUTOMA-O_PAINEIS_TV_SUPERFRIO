@@ -1,8 +1,11 @@
 import logging
 import os
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
+import traceback
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
@@ -29,7 +32,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 URL = "http://operationsreports.superfrio.com.br:8080/pentaho/Home"
 
-USUARIO = os.getenv("PENTAHO_USUARIO", "JOAO.PEREIRA")
+USUARIO = os.getenv("PENTAHO_USUARIO", "JOAO.PEREIRA").strip()
 SENHA = os.getenv("PENTAHO_SENHA", "jPereira!@#")
 
 
@@ -80,6 +83,66 @@ BOTAO_APLICAR_FILTRO = "Aplicar Filtro (Todos)"
 
 
 # ============================================================
+# ARQUIVOS, ERROS E PREPARAÇÃO DO NAVEGADOR
+# ============================================================
+
+EXECUTANDO_COMO_EXE = bool(
+    getattr(sys, "frozen", False)
+)
+
+
+def obter_pasta_projeto() -> Path:
+    """
+    Retorna a raiz do projeto.
+
+    Em desenvolvimento, gerar_relatorio.py fica em utils/,
+    portanto a raiz é a pasta pai de utils.
+
+    No executável, a raiz é a pasta onde está o próprio EXE.
+    """
+    if EXECUTANDO_COMO_EXE:
+        return Path(sys.executable).resolve().parent
+
+    pasta_arquivo = Path(__file__).resolve().parent
+
+    if pasta_arquivo.name.lower() == "utils":
+        return pasta_arquivo.parent
+
+    return pasta_arquivo
+
+
+PASTA_PROJETO = obter_pasta_projeto()
+ARQUIVO_ERRO = PASTA_PROJETO / "erro.txt"
+PASTA_DIAGNOSTICOS = PASTA_PROJETO / "diagnosticos"
+
+# True:
+#   encerra todas as janelas/processos do Chrome e Edge antes
+#   de iniciar a automação e aguarda 10 segundos.
+#
+# False:
+#   não fecha nenhum navegador existente e abre um novo Chrome.
+FECHAR_TELAS: bool = True
+
+# Tenta impedir a exibição da faixa:
+# "O Chrome está sendo controlado por um software de teste automatizado".
+OCULTAR_AVISO_AUTOMACAO: bool = True
+
+# Ao concluir o processo, coloca o relatório em tela cheia.
+ATIVAR_F11_NO_FINAL: bool = True
+
+TEMPO_ESPERA_APOS_FECHAR_NAVEGADORES = 10
+TENTATIVAS_FECHAR_NAVEGADORES = 3
+INTERVALO_TENTATIVAS_NAVEGADORES = 1.0
+
+PROCESSOS_NAVEGADORES = (
+    "chrome.exe",
+    "msedge.exe",
+    "chromedriver.exe",
+    "msedgedriver.exe",
+)
+
+
+# ============================================================
 # ESTADO GLOBAL
 # ============================================================
 
@@ -98,6 +161,602 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("pentaho-automation")
+
+
+
+# ============================================================
+# REGISTRO DE ERROS
+# ============================================================
+
+_erro_lock = threading.Lock()
+
+
+def registrar_erro_txt(
+    *,
+    etapa: str,
+    erro: BaseException | str,
+    traceback_texto: str | None = None,
+) -> None:
+    """
+    Acrescenta uma ocorrência ao arquivo erro.txt.
+
+    O arquivo fica na raiz do projeto, ao lado do executável
+    ou do LoopAtualizar.py.
+    """
+    momento = datetime.now().strftime(
+        "%d/%m/%Y %H:%M:%S"
+    )
+
+    if isinstance(erro, BaseException):
+        nome_erro = type(erro).__name__
+        mensagem_erro = str(erro)
+    else:
+        nome_erro = "Erro"
+        mensagem_erro = str(erro)
+
+    if traceback_texto is None:
+        traceback_texto = traceback.format_exc()
+
+        if traceback_texto.strip() == "NoneType: None":
+            traceback_texto = ""
+
+    bloco = (
+        "\n"
+        + "=" * 80
+        + "\n"
+        + f"DATA/HORA: {momento}\n"
+        + f"AGENDAMENTO: {NOME_AGENDAMENTO}\n"
+        + f"ETAPA: {etapa}\n"
+        + f"TIPO: {nome_erro}\n"
+        + f"MENSAGEM: {mensagem_erro}\n"
+        + f"HORA INICIAL: {HORA_INICIAL}\n"
+        + f"HORA FINAL: {HORA_FINAL}\n"
+    )
+
+    if traceback_texto:
+        bloco += (
+            "\nTRACEBACK:\n"
+            + traceback_texto.rstrip()
+            + "\n"
+        )
+
+    bloco += "=" * 80 + "\n"
+
+    try:
+        with _erro_lock:
+            ARQUIVO_ERRO.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            with ARQUIVO_ERRO.open(
+                mode="a",
+                encoding="utf-8",
+                newline="",
+            ) as arquivo:
+                arquivo.write(bloco)
+                arquivo.flush()
+
+                try:
+                    os.fsync(
+                        arquivo.fileno()
+                    )
+                except OSError:
+                    pass
+
+        logger.error(
+            "Erro registrado em: %s",
+            ARQUIVO_ERRO,
+        )
+
+    except OSError:
+        logger.exception(
+            "Não foi possível gravar o arquivo de erros em %s.",
+            ARQUIVO_ERRO,
+        )
+
+
+def registrar_excecao_nao_tratada(
+    tipo_excecao,
+    excecao,
+    traceback_objeto,
+) -> None:
+    """Registra falhas não capturadas na thread principal."""
+    texto = "".join(
+        traceback.format_exception(
+            tipo_excecao,
+            excecao,
+            traceback_objeto,
+        )
+    )
+
+    registrar_erro_txt(
+        etapa="Exceção não tratada na thread principal",
+        erro=excecao,
+        traceback_texto=texto,
+    )
+
+    sys.__excepthook__(
+        tipo_excecao,
+        excecao,
+        traceback_objeto,
+    )
+
+
+def registrar_excecao_thread(
+    argumentos,
+) -> None:
+    """Registra falhas não capturadas em qualquer thread."""
+    texto = "".join(
+        traceback.format_exception(
+            argumentos.exc_type,
+            argumentos.exc_value,
+            argumentos.exc_traceback,
+        )
+    )
+
+    registrar_erro_txt(
+        etapa=(
+            "Exceção não tratada na thread "
+            f"{argumentos.thread.name}"
+        ),
+        erro=argumentos.exc_value,
+        traceback_texto=texto,
+    )
+
+
+sys.excepthook = registrar_excecao_nao_tratada
+threading.excepthook = registrar_excecao_thread
+
+
+# ============================================================
+# FECHAMENTO DO CHROME E EDGE
+# ============================================================
+
+def processo_windows_esta_ativo(
+    nome_processo: str,
+) -> bool:
+    """Verifica pelo tasklist se um processo está ativo."""
+    if os.name != "nt":
+        return False
+
+    try:
+        resultado = subprocess.run(
+            [
+                "tasklist",
+                "/FI",
+                f"IMAGENAME eq {nome_processo}",
+                "/FO",
+                "CSV",
+                "/NH",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            creationflags=getattr(
+                subprocess,
+                "CREATE_NO_WINDOW",
+                0,
+            ),
+        )
+
+        saida = (
+            resultado.stdout or ""
+        ).lower()
+
+        return nome_processo.lower() in saida
+
+    except (
+        OSError,
+        subprocess.SubprocessError,
+    ) as erro:
+        registrar_erro_txt(
+            etapa=f"Verificar processo {nome_processo}",
+            erro=erro,
+        )
+        return False
+
+
+def encerrar_processo_windows(
+    nome_processo: str,
+) -> bool:
+    """
+    Encerra um processo e seus filhos usando taskkill.
+
+    Retorna True quando o processo não existe mais.
+    """
+    if os.name != "nt":
+        logger.warning(
+            "O fechamento automático de navegadores "
+            "está disponível apenas no Windows."
+        )
+        return True
+
+    if not processo_windows_esta_ativo(
+        nome_processo
+    ):
+        logger.info(
+            "Processo já estava fechado: %s",
+            nome_processo,
+        )
+        return True
+
+    try:
+        resultado = subprocess.run(
+            [
+                "taskkill",
+                "/F",
+                "/T",
+                "/IM",
+                nome_processo,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            creationflags=getattr(
+                subprocess,
+                "CREATE_NO_WINDOW",
+                0,
+            ),
+        )
+
+        if resultado.returncode == 0:
+            logger.info(
+                "Processo encerrado: %s",
+                nome_processo,
+            )
+        else:
+            logger.warning(
+                "taskkill retornou código %s para %s. Saída: %s",
+                resultado.returncode,
+                nome_processo,
+                (
+                    resultado.stderr
+                    or resultado.stdout
+                    or ""
+                ).strip(),
+            )
+
+    except (
+        OSError,
+        subprocess.SubprocessError,
+    ) as erro:
+        registrar_erro_txt(
+            etapa=f"Encerrar processo {nome_processo}",
+            erro=erro,
+        )
+        return False
+
+    time.sleep(
+        0.5
+    )
+
+    return not processo_windows_esta_ativo(
+        nome_processo
+    )
+
+
+def fechar_chrome_e_edge() -> None:
+    """
+    Fecha todas as janelas e processos do Chrome e do Edge.
+
+    Isso fecha todas as abas abertas pelo usuário nos dois
+    navegadores, inclusive sessões que não pertencem à automação.
+    """
+    atualizar_status(
+        "Fechando todas as abas do Chrome e Edge..."
+    )
+
+    logger.info(
+        "Iniciando fechamento de Chrome e Edge."
+    )
+
+    pendentes = set(
+        PROCESSOS_NAVEGADORES
+    )
+
+    for tentativa in range(
+        1,
+        TENTATIVAS_FECHAR_NAVEGADORES + 1,
+    ):
+        logger.info(
+            "Tentativa %d/%d de fechar navegadores.",
+            tentativa,
+            TENTATIVAS_FECHAR_NAVEGADORES,
+        )
+
+        for nome_processo in tuple(
+            pendentes
+        ):
+            if encerrar_processo_windows(
+                nome_processo
+            ):
+                pendentes.discard(
+                    nome_processo
+                )
+
+        if not pendentes:
+            break
+
+        time.sleep(
+            INTERVALO_TENTATIVAS_NAVEGADORES
+        )
+
+    # Edge Startup Boost pode recriar processos em segundo plano.
+    time.sleep(
+        1.0
+    )
+
+    for nome_processo in PROCESSOS_NAVEGADORES:
+        if processo_windows_esta_ativo(
+            nome_processo
+        ):
+            encerrar_processo_windows(
+                nome_processo
+            )
+
+    ainda_ativos = [
+        nome
+        for nome in PROCESSOS_NAVEGADORES
+        if processo_windows_esta_ativo(nome)
+    ]
+
+    if ainda_ativos:
+        mensagem = (
+            "Não foi possível confirmar o fechamento de: "
+            + ", ".join(ainda_ativos)
+        )
+
+        logger.warning(
+            mensagem
+        )
+
+        registrar_erro_txt(
+            etapa="Fechamento dos navegadores",
+            erro=mensagem,
+            traceback_texto="",
+        )
+    else:
+        logger.info(
+            "Chrome e Edge foram fechados."
+        )
+
+
+def aguardar_antes_de_iniciar(
+    segundos: int = TEMPO_ESPERA_APOS_FECHAR_NAVEGADORES,
+) -> None:
+    """Aguarda com atualização visual segundo a segundo."""
+    for restante in range(
+        segundos,
+        0,
+        -1,
+    ):
+        atualizar_status(
+            "Chrome e Edge fechados. "
+            f"Iniciando o processo em {restante}s..."
+        )
+
+        time.sleep(
+            1
+        )
+
+
+def preparar_navegadores() -> None:
+    """
+    Prepara o ambiente do navegador conforme FECHAR_TELAS.
+
+    FECHAR_TELAS=True:
+        Fecha Chrome, Edge e drivers antigos.
+        Aguarda TEMPO_ESPERA_APOS_FECHAR_NAVEGADORES segundos.
+
+    FECHAR_TELAS=False:
+        Preserva todos os navegadores já abertos.
+        O Selenium abrirá uma nova janela do Chrome normalmente.
+    """
+    if not FECHAR_TELAS:
+        logger.info(
+            "FECHAR_TELAS=False: Chrome e Edge existentes "
+            "serão preservados."
+        )
+
+        atualizar_status(
+            "Navegadores existentes serão mantidos. "
+            "Abrindo uma nova janela..."
+        )
+
+        return
+
+    logger.info(
+        "FECHAR_TELAS=True: Chrome e Edge serão encerrados."
+    )
+
+    fechar_chrome_e_edge()
+
+    aguardar_antes_de_iniciar(
+        TEMPO_ESPERA_APOS_FECHAR_NAVEGADORES
+    )
+
+
+
+# ============================================================
+# CONFIGURAÇÃO DO CHROME E TELA CHEIA
+# ============================================================
+
+def criar_opcoes_chrome():
+    """
+    Cria as opções do Chrome mantendo o comportamento atual.
+
+    Quando OCULTAR_AVISO_AUTOMACAO=True, remove o switch que
+    normalmente exibe a faixa de automação no topo da janela.
+    """
+    opcoes = webdriver.ChromeOptions()
+
+    opcoes.add_argument(
+        "--start-maximized"
+    )
+
+    opcoes.add_experimental_option(
+        "detach",
+        True,
+    )
+
+    if OCULTAR_AVISO_AUTOMACAO:
+        opcoes.add_argument(
+            "--disable-infobars"
+        )
+
+        opcoes.add_argument(
+            "--disable-blink-features=AutomationControlled"
+        )
+
+        opcoes.add_experimental_option(
+            "excludeSwitches",
+            [
+                "enable-automation",
+                "enable-logging",
+            ],
+        )
+
+        opcoes.add_experimental_option(
+            "useAutomationExtension",
+            False,
+        )
+
+    return opcoes
+
+
+def aplicar_ajustes_apos_criar_driver() -> None:
+    """
+    Aplica ajustes adicionais após criar o ChromeDriver.
+
+    O script abaixo reduz a indicação JavaScript de automação.
+    Caso o Chrome rejeite esse comando, a automação continua.
+    """
+    if not OCULTAR_AVISO_AUTOMACAO:
+        return
+
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": (
+                    "Object.defineProperty("
+                    "navigator, 'webdriver', "
+                    "{get: () => undefined}"
+                    ");"
+                )
+            },
+        )
+
+        logger.info(
+            "Ajustes para ocultar o aviso de automação aplicados."
+        )
+
+    except Exception as erro:
+        logger.warning(
+            "Não foi possível aplicar todos os ajustes "
+            "de ocultação do aviso: %s",
+            erro,
+        )
+
+
+def focar_ultima_janela_chrome() -> None:
+    """Muda o Selenium para a última guia/janela disponível."""
+    if driver is None:
+        return
+
+    janelas = driver.window_handles
+
+    if not janelas:
+        raise WebDriverException(
+            "Nenhuma janela do Chrome está disponível."
+        )
+
+    driver.switch_to.window(
+        janelas[-1]
+    )
+
+    try:
+        driver.execute_script(
+            "window.focus();"
+        )
+    except WebDriverException:
+        pass
+
+
+def ativar_tela_cheia_final() -> None:
+    """
+    Coloca o relatório em tela cheia ao final do processo.
+
+    1. Foca a última janela do Chrome.
+    2. Usa fullscreen_window(), equivalente ao modo F11.
+    3. Caso o comando WebDriver falhe, usa PyAutoGUI para
+       pressionar F11 como fallback.
+    """
+    if not ATIVAR_F11_NO_FINAL:
+        logger.info(
+            "ATIVAR_F11_NO_FINAL=False: tela cheia desativada."
+        )
+        return
+
+    atualizar_status(
+        "Ativando tela cheia..."
+    )
+
+    try:
+        focar_ultima_janela_chrome()
+
+        # Comando WebDriver equivalente ao F11.
+        driver.fullscreen_window()
+
+        time.sleep(
+            1.0
+        )
+
+        logger.info(
+            "Tela cheia ativada pelo WebDriver."
+        )
+
+        return
+
+    except Exception as erro:
+        logger.warning(
+            "fullscreen_window() falhou; "
+            "tentando pressionar F11: %s",
+            erro,
+        )
+
+    try:
+        focar_ultima_janela_chrome()
+
+        time.sleep(
+            0.8
+        )
+
+        # Fallback literal solicitado.
+        pg.press(
+            "f11"
+        )
+
+        time.sleep(
+            1.0
+        )
+
+        logger.info(
+            "F11 pressionado com PyAutoGUI."
+        )
+
+    except Exception as erro:
+        registrar_erro_txt(
+            etapa="Ativar tela cheia no final",
+            erro=erro,
+        )
+
+        logger.exception(
+            "Não foi possível ativar a tela cheia."
+        )
 
 
 # ============================================================
@@ -128,16 +787,28 @@ def exibir_erro(titulo: str, mensagem: str) -> None:
 
 
 def concluir_interface() -> None:
-    """Mostra a conclusão e fecha a pequena janela automaticamente."""
+    """
+    Mostra a conclusão e fecha a pequena janela automaticamente.
+
+    O F11 agora é acionado pela função ativar_tela_cheia_final()
+    ainda na thread do Selenium, garantindo que o Chrome seja
+    o alvo do comando.
+    """
     if not janela.winfo_exists():
         return
 
-    status_variavel.set("Processo concluído com sucesso.")
-    time.sleep(2.5)
-    pg.press("f11")
-    time.sleep(1.5)
-    contador_variavel.set("Concluído")
-    janela.after(2500, janela.destroy)
+    status_variavel.set(
+        "Processo concluído com sucesso."
+    )
+
+    contador_variavel.set(
+        "Concluído"
+    )
+
+    janela.after(
+        2500,
+        janela.destroy,
+    )
 
 
 # ============================================================
@@ -150,7 +821,7 @@ def salvar_diagnostico(nome: str = "erro") -> None:
         return
 
     try:
-        pasta = Path("diagnosticos")
+        pasta = PASTA_DIAGNOSTICOS
         pasta.mkdir(parents=True, exist_ok=True)
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -162,8 +833,13 @@ def salvar_diagnostico(nome: str = "erro") -> None:
 
         logger.info("Diagnóstico salvo em: %s", pasta.resolve())
 
-    except Exception:
+    except Exception as erro:
         logger.exception("Não foi possível salvar o diagnóstico.")
+
+        registrar_erro_txt(
+            etapa="Salvar diagnóstico",
+            erro=erro,
+        )
 
 
 # ============================================================
@@ -2506,14 +3182,25 @@ def executar_processo() -> None:
     global processo_em_execucao
 
     try:
+        # Antes de criar o WebDriver:
+        # 1. fecha Chrome e Edge;
+        # 2. aguarda 10 segundos;
+        # 3. só então abre um novo Chrome.
+        preparar_navegadores()
+
         atualizar_status("Abrindo o Chrome...")
 
-        opcoes = webdriver.ChromeOptions()
-        opcoes.add_argument("--start-maximized")
-        opcoes.add_experimental_option("detach", True)
+        opcoes = criar_opcoes_chrome()
 
-        driver = webdriver.Chrome(options=opcoes)
-        driver.get(URL)
+        driver = webdriver.Chrome(
+            options=opcoes
+        )
+
+        aplicar_ajustes_apos_criar_driver()
+
+        driver.get(
+            URL
+        )
 
         atualizar_status("Aguardando a página inicial...")
         aguardar_documento_pronto()
@@ -2561,13 +3248,28 @@ def executar_processo() -> None:
             hora_final=HORA_FINAL,
         )
 
-        logger.info("Processo concluído com sucesso.")
+        # O filtro já foi aplicado. Agora coloca o relatório
+        # na última janela do Chrome em tela cheia.
+        ativar_tela_cheia_final()
+
+        logger.info(
+            "Processo concluído com sucesso."
+        )
 
         if janela.winfo_exists():
-            janela.after(0, concluir_interface)
+            janela.after(
+                0,
+                concluir_interface,
+            )
 
     except TimeoutException as erro:
         logger.exception("Tempo limite excedido.")
+
+        registrar_erro_txt(
+            etapa="Timeout durante a automação",
+            erro=erro,
+        )
+
         atualizar_status("Tempo limite excedido.")
         salvar_diagnostico("timeout")
 
@@ -2583,6 +3285,12 @@ def executar_processo() -> None:
 
     except Exception as erro:
         logger.exception("Erro durante a automação.")
+
+        registrar_erro_txt(
+            etapa="Erro geral durante a automação",
+            erro=erro,
+        )
+
         atualizar_status("Erro durante o processo.")
         salvar_diagnostico("erro")
 
@@ -2631,6 +3339,11 @@ def validar_configuracao() -> bool:
         )
 
     except ValueError as erro:
+        registrar_erro_txt(
+            etapa="Validação das datas e horários",
+            erro=erro,
+        )
+
         messagebox.showwarning(
             "Horários inválidos",
             str(erro),
@@ -2638,10 +3351,15 @@ def validar_configuracao() -> bool:
         return False
 
     logger.info(
-        "Configuração validada: agendamento=%s | início=%s | fim=%s",
+        "Configuração validada: agendamento=%s | "
+        "início=%s | fim=%s | fechar_telas=%s | "
+        "ocultar_aviso=%s | f11_final=%s",
         NOME_AGENDAMENTO,
         HORA_INICIAL,
         HORA_FINAL,
+        FECHAR_TELAS,
+        OCULTAR_AVISO_AUTOMACAO,
+        ATIVAR_F11_NO_FINAL,
     )
 
     return True
@@ -2747,14 +3465,38 @@ cancelar_label = tk.Label(
 cancelar_label.pack(pady=8)
 
 
-def main() -> None:
-    janela.after(
-        250,
-        executar_contagem_regressiva,
-        CONTAGEM_INICIAL,
-    )
-    janela.mainloop()
+def main() -> int:
+    """Inicia a aplicação e registra falhas de inicialização."""
+    try:
+        janela.after(
+            250,
+            executar_contagem_regressiva,
+            CONTAGEM_INICIAL,
+        )
+
+        janela.mainloop()
+        return 0
+
+    except KeyboardInterrupt:
+        logger.warning(
+            "Automação interrompida pelo usuário."
+        )
+        return 130
+
+    except Exception as erro:
+        logger.exception(
+            "Erro ao iniciar ou manter a interface."
+        )
+
+        registrar_erro_txt(
+            etapa="Inicialização da aplicação",
+            erro=erro,
+        )
+
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(
+        main()
+    )
