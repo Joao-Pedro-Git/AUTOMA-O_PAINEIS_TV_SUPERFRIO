@@ -55,7 +55,7 @@ class AgendamentoPentaho:
 AGENDAMENTOS: tuple[AgendamentoPentaho, ...] = (
     AgendamentoPentaho(
         nome="T1",
-        horario_execucao="14:15:00", # Esse horarios é responsável por disparar a automação.
+        horario_execucao="05:45:00", # Esse horarios é responsável por disparar a automação.
         horario_inicial_pentaho="06:00:00", # Esse horario é responsável pela data INICIAL do RELATOIO DO PENTAHO.
         horario_final_pentaho="14:00:00", # Esse horario é responsável pela data FINAL do RELATOIO DO PENTAHO.
         deslocamento_dia_inicial=0,
