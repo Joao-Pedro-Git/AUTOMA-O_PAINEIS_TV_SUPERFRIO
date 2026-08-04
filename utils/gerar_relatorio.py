@@ -6,6 +6,7 @@ import threading
 import time
 import tkinter as tk
 import traceback
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
@@ -13,9 +14,11 @@ import pyautogui as pg
 
 from selenium import webdriver
 from selenium.common.exceptions import (
+    InvalidSessionIdException,
     JavascriptException,
     NoSuchElementException,
     NoSuchFrameException,
+    NoSuchWindowException,
     StaleElementReferenceException,
     TimeoutException,
     WebDriverException,
@@ -23,7 +26,6 @@ from selenium.common.exceptions import (
 from selenium.webdriver import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
 
 
 # ============================================================
@@ -32,13 +34,166 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 URL = "http://operationsreports.superfrio.com.br:8080/pentaho/Home"
 
+# ============================================================
+# NAVEGADOR DA AUTOMAÇÃO
+# ============================================================
+
+# Opções aceitas:
+#   "CHROME"
+#   "EDGE"
+#
+# Também pode ser definido no Windows pela variável:
+#   PENTAHO_NAVEGADOR=CHROME
+#   PENTAHO_NAVEGADOR=EDGE
+NAVEGADOR = os.getenv(
+    "PENTAHO_NAVEGADOR",
+    "EDGE",
+).strip().upper()
+
+NAVEGADORES_SUPORTADOS = (
+    "CHROME",
+    "EDGE",
+)
+
 USUARIO = os.getenv("PENTAHO_USUARIO", "JOAO.PEREIRA").strip()
 SENHA = os.getenv("PENTAHO_SENHA", "jPereira!@#")
 
 
-TIMEOUT = 90
-INTERVALO_VERIFICACAO = 0.30
-PAUSA_GLOBAL = 3.0
+def ler_bool_ambiente(
+    nome: str,
+    padrao: bool,
+) -> bool:
+    """Lê uma variável booleana do ambiente com segurança."""
+    valor = os.getenv(nome)
+
+    if valor is None:
+        return padrao
+
+    valor_normalizado = valor.strip().lower()
+
+    if valor_normalizado in {
+        "1",
+        "true",
+        "sim",
+        "yes",
+        "on",
+    }:
+        return True
+
+    if valor_normalizado in {
+        "0",
+        "false",
+        "nao",
+        "não",
+        "no",
+        "off",
+    }:
+        return False
+
+    return padrao
+
+
+def ler_float_ambiente(
+    nome: str,
+    padrao: float,
+    *,
+    minimo: float | None = None,
+) -> float:
+    """Lê uma variável numérica sem derrubar a automação."""
+    valor = os.getenv(nome)
+
+    try:
+        resultado = (
+            float(valor)
+            if valor is not None
+            else float(padrao)
+        )
+    except (TypeError, ValueError):
+        resultado = float(padrao)
+
+    if minimo is not None:
+        resultado = max(
+            minimo,
+            resultado,
+        )
+
+    return resultado
+
+
+# True: as esperas críticas não possuem prazo máximo. O processo
+# continua aguardando enquanto a página, o computador ou a rede
+# ainda estiverem respondendo lentamente.
+#
+# False: utiliza PENTAHO_TIMEOUT_SEGUNDOS como limite por espera.
+ESPERA_INDEFINIDA: bool = ler_bool_ambiente(
+    "PENTAHO_ESPERA_INDEFINIDA",
+    True,
+)
+
+TIMEOUT_CONFIGURADO = ler_float_ambiente(
+    "PENTAHO_TIMEOUT_SEGUNDOS",
+    600.0,
+    minimo=0.0,
+)
+
+# Compatibilidade: o restante do arquivo continua usando TIMEOUT.
+# None significa espera sem limite para as funções adaptativas.
+TIMEOUT: float | None = (
+    None
+    if ESPERA_INDEFINIDA or TIMEOUT_CONFIGURADO <= 0
+    else TIMEOUT_CONFIGURADO
+)
+
+INTERVALO_VERIFICACAO = ler_float_ambiente(
+    "PENTAHO_INTERVALO_VERIFICACAO",
+    0.50,
+    minimo=0.10,
+)
+
+PAUSA_GLOBAL = ler_float_ambiente(
+    "PENTAHO_PAUSA_GLOBAL",
+    3.0,
+    minimo=0.0,
+)
+
+# Durante esperas longas, atualiza a janela e o log periodicamente
+# para mostrar que a automação não travou.
+INTERVALO_AVISO_ESPERA = ler_float_ambiente(
+    "PENTAHO_INTERVALO_AVISO_ESPERA",
+    15.0,
+    minimo=3.0,
+)
+
+MAX_PROFUNDIDADE_IFRAMES = int(
+    ler_float_ambiente(
+        "PENTAHO_MAX_PROFUNDIDADE_IFRAMES",
+        15,
+        minimo=1,
+    )
+)
+
+TENTATIVAS_CRIAR_DRIVER = int(
+    ler_float_ambiente(
+        "PENTAHO_TENTATIVAS_CRIAR_DRIVER",
+        3,
+        minimo=1,
+    )
+)
+
+INTERVALO_TENTATIVAS_DRIVER = ler_float_ambiente(
+    "PENTAHO_INTERVALO_TENTATIVAS_DRIVER",
+    8.0,
+    minimo=1.0,
+)
+
+# Esperas curtas são usadas apenas para decidir um fallback, nunca
+# para encerrar o processo principal.
+TIMEOUT_FALLBACK_CURTO = ler_float_ambiente(
+    "PENTAHO_TIMEOUT_FALLBACK_CURTO",
+    8.0,
+    minimo=1.0,
+)
+
 CONTAGEM_INICIAL = 5
 
 CAMINHO_PUBLIC = "/public"
@@ -120,7 +275,8 @@ PASTA_DIAGNOSTICOS = PASTA_PROJETO / "diagnosticos"
 #   de iniciar a automação e aguarda 10 segundos.
 #
 # False:
-#   não fecha nenhum navegador existente e abre um novo Chrome.
+#   não fecha nenhum navegador existente e abre uma nova janela
+#   do navegador selecionado em NAVEGADOR.
 FECHAR_TELAS: bool = True
 
 # Tenta impedir a exibição da faixa:
@@ -149,6 +305,9 @@ PROCESSOS_NAVEGADORES = (
 driver = None
 processo_em_execucao = False
 
+# Permite interromper laços de espera adaptativos de forma segura.
+EVENTO_CANCELAMENTO = threading.Event()
+
 
 # ============================================================
 # LOGGING
@@ -161,6 +320,71 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("pentaho-automation")
+
+
+# ============================================================
+# IDENTIFICAÇÃO E VALIDAÇÃO DO NAVEGADOR
+# ============================================================
+
+def normalizar_navegador(
+    valor: str,
+) -> str:
+    """
+    Normaliza o nome do navegador.
+
+    Valores aceitos:
+        CHROME
+        GOOGLE CHROME
+        CHROMIUM
+        EDGE
+        MICROSOFT EDGE
+        MSEDGE
+    """
+    valor_normalizado = (
+        str(valor or "")
+        .strip()
+        .upper()
+        .replace("_", " ")
+        .replace("-", " ")
+    )
+
+    aliases = {
+        "CHROME": "CHROME",
+        "GOOGLE CHROME": "CHROME",
+        "CHROMIUM": "CHROME",
+        "EDGE": "EDGE",
+        "MICROSOFT EDGE": "EDGE",
+        "MSEDGE": "EDGE",
+        "MS EDGE": "EDGE",
+    }
+
+    navegador = aliases.get(
+        valor_normalizado
+    )
+
+    if navegador is None:
+        raise ValueError(
+            "Navegador inválido. Use CHROME ou EDGE. "
+            f"Valor recebido: {valor!r}"
+        )
+
+    return navegador
+
+
+def navegador_selecionado() -> str:
+    """Retorna CHROME ou EDGE após validar a configuração."""
+    return normalizar_navegador(
+        NAVEGADOR
+    )
+
+
+def nome_navegador_exibicao() -> str:
+    """Retorna o nome amigável do navegador selecionado."""
+    return (
+        "Google Chrome"
+        if navegador_selecionado() == "CHROME"
+        else "Microsoft Edge"
+    )
 
 
 
@@ -207,6 +431,7 @@ def registrar_erro_txt(
         + f"DATA/HORA: {momento}\n"
         + f"AGENDAMENTO: {NOME_AGENDAMENTO}\n"
         + f"ETAPA: {etapa}\n"
+        + f"NAVEGADOR: {NAVEGADOR}\n"
         + f"TIPO: {nome_erro}\n"
         + f"MENSAGEM: {mensagem_erro}\n"
         + f"HORA INICIAL: {HORA_INICIAL}\n"
@@ -553,7 +778,7 @@ def preparar_navegadores() -> None:
 
     FECHAR_TELAS=False:
         Preserva todos os navegadores já abertos.
-        O Selenium abrirá uma nova janela do Chrome normalmente.
+        O Selenium abrirá uma nova janela do navegador escolhido.
     """
     if not FECHAR_TELAS:
         logger.info(
@@ -563,7 +788,7 @@ def preparar_navegadores() -> None:
 
         atualizar_status(
             "Navegadores existentes serão mantidos. "
-            "Abrindo uma nova janela..."
+            f"Abrindo uma nova janela do {nome_navegador_exibicao()}..."
         )
 
         return
@@ -584,17 +809,41 @@ def preparar_navegadores() -> None:
 # CONFIGURAÇÃO DO CHROME E TELA CHEIA
 # ============================================================
 
-def criar_opcoes_chrome():
+def criar_opcoes_navegador():
     """
-    Cria as opções do Chrome mantendo o comportamento atual.
+    Cria opções estáveis para Chrome ou Edge em computadores lentos.
 
-    Quando OCULTAR_AVISO_AUTOMACAO=True, remove o switch que
-    normalmente exibe a faixa de automação no topo da janela.
+    pageLoadStrategy=eager evita que driver.get() fique bloqueado
+    esperando imagens e recursos secundários. As funções adaptativas
+    continuam aguardando os elementos reais do Pentaho.
     """
-    opcoes = webdriver.ChromeOptions()
+    navegador = navegador_selecionado()
+
+    if navegador == "CHROME":
+        opcoes = webdriver.ChromeOptions()
+    else:
+        opcoes = webdriver.EdgeOptions()
+
+    opcoes.page_load_strategy = "eager"
 
     opcoes.add_argument(
         "--start-maximized"
+    )
+
+    opcoes.add_argument(
+        "--disable-background-timer-throttling"
+    )
+
+    opcoes.add_argument(
+        "--disable-backgrounding-occluded-windows"
+    )
+
+    opcoes.add_argument(
+        "--disable-renderer-backgrounding"
+    )
+
+    opcoes.add_argument(
+        "--disable-features=CalculateNativeWinOcclusion"
     )
 
     opcoes.add_experimental_option(
@@ -626,13 +875,87 @@ def criar_opcoes_chrome():
 
     return opcoes
 
+def criar_driver_navegador():
+    """
+    Cria o WebDriver com tentativas automáticas.
+
+    Isso cobre inicialização lenta do navegador, Selenium Manager,
+    antivírus e máquinas com pouco recurso disponível.
+    """
+    navegador = navegador_selecionado()
+    ultimo_erro: BaseException | None = None
+
+    for tentativa in range(
+        1,
+        TENTATIVAS_CRIAR_DRIVER + 1,
+    ):
+        atualizar_status(
+            f"Abrindo o {nome_navegador_exibicao()} "
+            f"(tentativa {tentativa}/{TENTATIVAS_CRIAR_DRIVER})..."
+        )
+
+        try:
+            opcoes = criar_opcoes_navegador()
+
+            if navegador == "CHROME":
+                navegador_driver = webdriver.Chrome(
+                    options=opcoes
+                )
+            else:
+                navegador_driver = webdriver.Edge(
+                    options=opcoes
+                )
+
+            # Não combinar implicit wait com nossas esperas explícitas.
+            navegador_driver.implicitly_wait(0)
+
+            logger.info(
+                "%s iniciado na tentativa %d.",
+                nome_navegador_exibicao(),
+                tentativa,
+            )
+
+            return navegador_driver
+
+        except Exception as erro:
+            ultimo_erro = erro
+            logger.exception(
+                "Falha ao iniciar %s na tentativa %d/%d.",
+                nome_navegador_exibicao(),
+                tentativa,
+                TENTATIVAS_CRIAR_DRIVER,
+            )
+
+            if tentativa < TENTATIVAS_CRIAR_DRIVER:
+                atualizar_status(
+                    "O navegador ainda não iniciou. "
+                    f"Nova tentativa em {INTERVALO_TENTATIVAS_DRIVER:.0f}s..."
+                )
+                pausa_responsiva(
+                    INTERVALO_TENTATIVAS_DRIVER
+                )
+
+    raise WebDriverException(
+        f"Não foi possível iniciar {nome_navegador_exibicao()} "
+        f"após {TENTATIVAS_CRIAR_DRIVER} tentativas. "
+        f"Último erro: {ultimo_erro}"
+    )
+
+def criar_opcoes_chrome():
+    """
+    Alias mantido por compatibilidade com versões anteriores.
+
+    Novos trechos devem usar criar_opcoes_navegador().
+    """
+    return criar_opcoes_navegador()
+
 
 def aplicar_ajustes_apos_criar_driver() -> None:
     """
-    Aplica ajustes adicionais após criar o ChromeDriver.
+    Aplica ajustes Chromium após criar o WebDriver.
 
-    O script abaixo reduz a indicação JavaScript de automação.
-    Caso o Chrome rejeite esse comando, a automação continua.
+    ChromeDriver e EdgeDriver oferecem execute_cdp_cmd(), pois
+    ambos controlam navegadores baseados em Chromium.
     """
     if not OCULTAR_AVISO_AUTOMACAO:
         return
@@ -651,18 +974,20 @@ def aplicar_ajustes_apos_criar_driver() -> None:
         )
 
         logger.info(
-            "Ajustes para ocultar o aviso de automação aplicados."
+            "Ajustes de automação aplicados no %s.",
+            nome_navegador_exibicao(),
         )
 
     except Exception as erro:
         logger.warning(
             "Não foi possível aplicar todos os ajustes "
-            "de ocultação do aviso: %s",
+            "no %s: %s",
+            nome_navegador_exibicao(),
             erro,
         )
 
 
-def focar_ultima_janela_chrome() -> None:
+def focar_ultima_janela_navegador() -> None:
     """Muda o Selenium para a última guia/janela disponível."""
     if driver is None:
         return
@@ -671,7 +996,7 @@ def focar_ultima_janela_chrome() -> None:
 
     if not janelas:
         raise WebDriverException(
-            "Nenhuma janela do Chrome está disponível."
+            "Nenhuma janela do navegador está disponível."
         )
 
     driver.switch_to.window(
@@ -684,6 +1009,13 @@ def focar_ultima_janela_chrome() -> None:
         )
     except WebDriverException:
         pass
+
+
+def focar_ultima_janela_chrome() -> None:
+    """
+    Alias mantido para não quebrar chamadas antigas.
+    """
+    focar_ultima_janela_navegador()
 
 
 def ativar_tela_cheia_final() -> None:
@@ -706,7 +1038,7 @@ def ativar_tela_cheia_final() -> None:
     )
 
     try:
-        focar_ultima_janela_chrome()
+        focar_ultima_janela_navegador()
 
         # Comando WebDriver equivalente ao F11.
         driver.fullscreen_window()
@@ -729,7 +1061,7 @@ def ativar_tela_cheia_final() -> None:
         )
 
     try:
-        focar_ultima_janela_chrome()
+        focar_ultima_janela_navegador()
 
         time.sleep(
             0.8
@@ -764,27 +1096,31 @@ def ativar_tela_cheia_final() -> None:
 # ============================================================
 
 def atualizar_status(texto: str) -> None:
-    """Atualiza o status na thread principal do Tkinter."""
+    """Atualiza o status sem falhar quando a janela já foi fechada."""
     logger.info(texto)
 
-    if janela.winfo_exists():
-        janela.after(
-            0,
-            lambda texto=texto: status_variavel.set(texto),
-        )
-
+    try:
+        if janela.winfo_exists():
+            janela.after(
+                0,
+                lambda texto=texto: status_variavel.set(texto),
+            )
+    except (tk.TclError, RuntimeError):
+        pass
 
 def exibir_erro(titulo: str, mensagem: str) -> None:
-    """Exibe um erro sem acessar o Tkinter pela thread do Selenium."""
-    if janela.winfo_exists():
-        janela.after(
-            0,
-            lambda titulo=titulo, mensagem=mensagem: messagebox.showerror(
-                titulo,
-                mensagem,
-            ),
-        )
-
+    """Exibe uma mensagem de erro pela thread principal do Tkinter."""
+    try:
+        if janela.winfo_exists():
+            janela.after(
+                0,
+                lambda titulo=titulo, mensagem=mensagem: messagebox.showerror(
+                    titulo,
+                    mensagem,
+                ),
+            )
+    except (tk.TclError, RuntimeError):
+        pass
 
 def concluir_interface() -> None:
     """
@@ -846,26 +1182,175 @@ def salvar_diagnostico(nome: str = "erro") -> None:
 # ESPERAS
 # ============================================================
 
+def normalizar_timeout(
+    timeout: float | int | None,
+) -> float | None:
+    """
+    Normaliza o prazo de uma espera.
+
+    None, zero ou valor negativo significam espera sem limite.
+    """
+    if timeout is None:
+        return None
+
+    try:
+        valor = float(timeout)
+    except (TypeError, ValueError):
+        return None
+
+    return valor if valor > 0 else None
+
+
+def aguardar_condicao(
+    condicao: Callable[[], object],
+    *,
+    descricao: str,
+    timeout: float | int | None = TIMEOUT,
+    intervalo: float | None = None,
+    atualizar_status_periodicamente: bool = True,
+):
+    """
+    Espera adaptativa utilizada em toda a automação.
+
+    Diferentemente de WebDriverWait com prazo rígido, esta função
+    pode aguardar indefinidamente. Enquanto espera, mantém um
+    heartbeat no log e na janela, o que diferencia lentidão de
+    travamento real.
+    """
+    prazo = normalizar_timeout(timeout)
+    intervalo_real = max(
+        0.05,
+        float(
+            INTERVALO_VERIFICACAO
+            if intervalo is None
+            else intervalo
+        ),
+    )
+
+    inicio = time.monotonic()
+    proximo_aviso = inicio + INTERVALO_AVISO_ESPERA
+    ultima_excecao: BaseException | None = None
+
+    while True:
+        if EVENTO_CANCELAMENTO.is_set():
+            raise InterruptedError(
+                f"Espera cancelada: {descricao}"
+            )
+
+        try:
+            resultado = condicao()
+
+            if resultado:
+                decorrido = time.monotonic() - inicio
+                logger.info(
+                    "%s disponível após %.1fs.",
+                    descricao,
+                    decorrido,
+                )
+                return resultado
+
+        except (
+            InvalidSessionIdException,
+            NoSuchWindowException,
+        ):
+            # Sessão encerrada ou janela fechada não é lentidão.
+            # Nesses casos, continuar esperando ocultaria o erro real.
+            raise
+
+        except (
+            JavascriptException,
+            NoSuchElementException,
+            NoSuchFrameException,
+            StaleElementReferenceException,
+            WebDriverException,
+        ) as erro:
+            # Erros transitórios são comuns enquanto o Pentaho
+            # recria o DOM. Eles não encerram a espera.
+            ultima_excecao = erro
+
+        agora = time.monotonic()
+        decorrido = agora - inicio
+
+        if prazo is not None and decorrido >= prazo:
+            complemento = (
+                f" Último erro transitório: {ultima_excecao}"
+                if ultima_excecao is not None
+                else ""
+            )
+
+            raise TimeoutException(
+                f"Não foi possível concluir: {descricao}. "
+                f"Tempo aguardado: {decorrido:.1f}s."
+                + complemento
+            )
+
+        if (
+            atualizar_status_periodicamente
+            and agora >= proximo_aviso
+        ):
+            mensagem = (
+                f"Ainda aguardando {descricao} "
+                f"({decorrido:.0f}s)..."
+            )
+            atualizar_status(mensagem)
+            proximo_aviso = agora + INTERVALO_AVISO_ESPERA
+
+        EVENTO_CANCELAMENTO.wait(
+            intervalo_real
+        )
+
+
+def pausa_responsiva(segundos: float) -> None:
+    """Pausa que pode ser interrompida pelo evento de cancelamento."""
+    if segundos <= 0:
+        return
+
+    if EVENTO_CANCELAMENTO.wait(segundos):
+        raise InterruptedError(
+            "Automação cancelada durante uma pausa."
+        )
+
+
 def pausa_adicional(descricao: str) -> None:
-    """Aplica a pausa global depois de uma grande etapa."""
+    """
+    Aplica apenas uma margem curta depois de grandes etapas.
+
+    A sincronização principal não depende desta pausa; ela depende
+    das condições reais da página.
+    """
+    if PAUSA_GLOBAL <= 0:
+        return
+
     atualizar_status(
-        f"{descricao} concluído. Aguardando {PAUSA_GLOBAL:.1f}s..."
+        f"{descricao} concluído. "
+        f"Aguardando estabilização por {PAUSA_GLOBAL:.1f}s..."
     )
-    time.sleep(PAUSA_GLOBAL)
+    pausa_responsiva(PAUSA_GLOBAL)
 
+def aguardar_documento_pronto(
+    timeout: float | int | None = TIMEOUT,
+) -> None:
+    """
+    Aguarda o documento ficar pronto sem prazo rígido por padrão.
 
-def aguardar_documento_pronto(timeout: int = TIMEOUT) -> None:
-    """Espera document.readyState ficar igual a complete."""
-    WebDriverWait(
-        driver,
-        timeout,
-        poll_frequency=INTERVALO_VERIFICACAO,
-    ).until(
-        lambda navegador: navegador.execute_script(
+    O modo pageLoadStrategy=eager permite que driver.get() retorne
+    cedo; esta função então aguarda o estado real do DOM.
+    """
+    def documento_pronto():
+        if driver is None:
+            return False
+
+        estado = driver.execute_script(
             "return document.readyState"
-        ) == "complete"
-    )
+        )
 
+        return estado == "complete"
+
+    aguardar_condicao(
+        documento_pronto,
+        descricao="o documento terminar de carregar",
+        timeout=timeout,
+    )
 
 def elemento_esta_disponivel(elemento, clicavel: bool) -> bool:
     """Verifica se um elemento está visível e utilizável."""
@@ -917,7 +1402,7 @@ def procurar_recursivamente_nos_frames(
 
     Quando encontra, o driver permanece no frame correto.
     """
-    if profundidade > 10:
+    if profundidade > MAX_PROFUNDIDADE_IFRAMES:
         return None
 
     elemento = procurar_no_contexto_atual(
@@ -972,39 +1457,41 @@ def esperar_elemento(
     localizadores: list[tuple[str, str]],
     *,
     clicavel: bool = True,
-    timeout: int = TIMEOUT,
+    timeout: float | int | None = TIMEOUT,
     descricao: str = "elemento",
 ):
-    """Aguarda um elemento na página ou em qualquer iframe."""
-    limite = time.monotonic() + timeout
+    """
+    Aguarda um elemento na página ou em qualquer iframe.
 
-    while time.monotonic() < limite:
+    Por padrão não existe prazo máximo. Um prazo explícito ainda
+    pode ser informado para decisões de fallback.
+    """
+    def procurar():
+        if driver is None:
+            return False
+
         try:
             driver.switch_to.default_content()
-
-            elemento = procurar_recursivamente_nos_frames(
-                localizadores,
-                clicavel,
-            )
-
-            if elemento is not None:
-                logger.info("Elemento encontrado: %s", descricao)
-                return elemento
-
         except WebDriverException:
-            pass
+            return False
 
-        time.sleep(INTERVALO_VERIFICACAO)
+        return procurar_recursivamente_nos_frames(
+            localizadores,
+            clicavel,
+        ) or False
 
-    try:
-        driver.switch_to.default_content()
-    except WebDriverException:
-        pass
-
-    raise TimeoutException(
-        f"Não foi possível encontrar: {descricao}"
+    elemento = aguardar_condicao(
+        procurar,
+        descricao=descricao,
+        timeout=timeout,
     )
 
+    logger.info(
+        "Elemento encontrado: %s",
+        descricao,
+    )
+
+    return elemento
 
 # ============================================================
 # CLIQUES
@@ -1108,27 +1595,86 @@ def clicar_duas_vezes(elemento) -> None:
 # ============================================================
 
 def realizar_login() -> None:
-    """Realiza o login ou continua se a sessão já estiver autenticada."""
-    atualizar_status("Verificando a tela de login...")
+    """
+    Aguarda até identificar uma destas situações:
 
-    try:
-        campo_usuario = esperar_elemento(
-            [
-                (By.ID, "j_username"),
-                (By.NAME, "j_username"),
-                (By.ID, "username"),
-                (By.NAME, "username"),
-                (By.CSS_SELECTOR, "input[type='text']"),
-            ],
-            clicavel=True,
-            timeout=12,
-            descricao="campo de usuário",
+    1. a tela de login apareceu; ou
+    2. a sessão já está autenticada e o Browse Files apareceu.
+
+    Não existe o antigo limite de 12 segundos, que podia falhar em
+    computadores lentos.
+    """
+    atualizar_status(
+        "Aguardando a tela de login ou uma sessão autenticada..."
+    )
+
+    localizadores_usuario = [
+        (By.ID, "j_username"),
+        (By.NAME, "j_username"),
+        (By.ID, "username"),
+        (By.NAME, "username"),
+        (By.CSS_SELECTOR, "input[type='text']"),
+    ]
+
+    localizadores_sessao = [
+        (
+            By.CSS_SELECTOR,
+            "[onclick*='browser.perspective']",
+        ),
+        (
+            By.XPATH,
+            "//*[normalize-space()='Browse Files']",
+        ),
+    ]
+
+    def detectar_estado():
+        try:
+            driver.switch_to.default_content()
+        except WebDriverException:
+            return False
+
+        campo = procurar_recursivamente_nos_frames(
+            localizadores_usuario,
+            True,
         )
-    except TimeoutException:
+
+        if campo is not None:
+            return (
+                "LOGIN",
+                campo,
+            )
+
+        try:
+            driver.switch_to.default_content()
+        except WebDriverException:
+            return False
+
+        sessao = procurar_recursivamente_nos_frames(
+            localizadores_sessao,
+            True,
+        )
+
+        if sessao is not None:
+            return (
+                "AUTENTICADO",
+                sessao,
+            )
+
+        return False
+
+    estado, campo_usuario = aguardar_condicao(
+        detectar_estado,
+        descricao="a tela de login ou a sessão do Pentaho",
+        timeout=TIMEOUT,
+    )
+
+    if estado == "AUTENTICADO":
         atualizar_status(
-            "Tela de login não encontrada; a sessão pode estar autenticada."
+            "Sessão do Pentaho já está autenticada."
         )
-        pausa_adicional("Verificação do login")
+        pausa_adicional(
+            "Verificação do login"
+        )
         return
 
     campo_senha = esperar_elemento(
@@ -1158,14 +1704,32 @@ def realizar_login() -> None:
         descricao="botão de login",
     )
 
-    atualizar_status("Realizando login...")
+    atualizar_status(
+        "Realizando login..."
+    )
     clicar(botao_login)
 
-    driver.switch_to.default_content()
-    atualizar_status("Aguardando o Pentaho concluir o login...")
-    aguardar_documento_pronto()
-    pausa_adicional("Login")
+    try:
+        driver.switch_to.default_content()
+    except WebDriverException:
+        pass
 
+    atualizar_status(
+        "Aguardando o Pentaho concluir o login..."
+    )
+
+    # Em vez de depender apenas do readyState, espera o recurso
+    # que comprova que a sessão autenticada terminou de carregar.
+    esperar_elemento(
+        localizadores_sessao,
+        clicavel=True,
+        timeout=TIMEOUT,
+        descricao="Browse Files após o login",
+    )
+
+    pausa_adicional(
+        "Login"
+    )
 
 # ============================================================
 # BROWSE FILES
@@ -1208,53 +1772,88 @@ def abrir_browse_por_javascript() -> bool:
 
 
 def abrir_browse_files() -> None:
-    """Abre a perspectiva Browse Files."""
-    atualizar_status("Aguardando o botão Browse Files...")
+    """
+    Abre a perspectiva Browse Files com espera adaptativa.
 
-    try:
-        botao = esperar_elemento(
-            [
-                (
-                    By.CSS_SELECTOR,
-                    "[onclick*='browser.perspective']",
-                ),
-                (
-                    By.XPATH,
-                    "//*[normalize-space()='Browse Files']",
-                ),
-                (
-                    By.XPATH,
-                    "//*[contains(normalize-space(), 'Browse Files')]",
-                ),
-            ],
-            timeout=30,
-            descricao="botão Browse Files",
+    Tenta o botão e o JavaScript repetidamente até um deles funcionar.
+    """
+    atualizar_status(
+        "Aguardando a opção Browse Files..."
+    )
+
+    localizadores_botao = [
+        (
+            By.CSS_SELECTOR,
+            "[onclick*='browser.perspective']",
+        ),
+        (
+            By.XPATH,
+            "//*[normalize-space()='Browse Files']",
+        ),
+        (
+            By.XPATH,
+            "//*[contains(normalize-space(), 'Browse Files')]",
+        ),
+    ]
+
+    acionado = False
+
+    def tentar_abrir():
+        nonlocal acionado
+
+        if acionado:
+            return True
+
+        try:
+            driver.switch_to.default_content()
+        except WebDriverException:
+            return False
+
+        botao = procurar_recursivamente_nos_frames(
+            localizadores_botao,
+            True,
         )
 
-        atualizar_status("Clicando em Browse Files...")
-        clicar(botao)
-
-    except TimeoutException:
-        atualizar_status(
-            "Botão não encontrado; abrindo Browse Files por JavaScript..."
-        )
-
-        if not abrir_browse_por_javascript():
-            raise TimeoutException(
-                "Não foi possível abrir a perspectiva Browse Files."
+        if botao is not None:
+            atualizar_status(
+                "Clicando em Browse Files..."
             )
+            clicar(botao)
+            acionado = True
+            return True
 
-    atualizar_status("Aguardando a árvore de pastas...")
+        if abrir_browse_por_javascript():
+            atualizar_status(
+                "Browse Files acionado por JavaScript."
+            )
+            acionado = True
+            return True
+
+        return False
+
+    aguardar_condicao(
+        tentar_abrir,
+        descricao="a opção Browse Files ficar disponível",
+        timeout=TIMEOUT,
+    )
+
+    atualizar_status(
+        "Aguardando a árvore de pastas..."
+    )
 
     esperar_elemento(
-        localizadores_pasta("Public", CAMINHO_PUBLIC),
+        localizadores_pasta(
+            "Public",
+            CAMINHO_PUBLIC,
+        ),
         clicavel=False,
         timeout=TIMEOUT,
         descricao="pasta Public",
     )
 
-    pausa_adicional("Abertura do Browse Files")
-
+    pausa_adicional(
+        "Abertura do Browse Files"
+    )
 
 # ============================================================
 # ÁRVORE DE PASTAS
@@ -1686,39 +2285,52 @@ def localizadores_acao_arquivo(
 
 def aguardar_nova_janela(
     janelas_anteriores: set[str],
-    timeout: int = 20,
+    timeout: float | int | None = TIMEOUT,
+    url_anterior: str | None = None,
 ) -> str | None:
     """
-    Aguarda uma nova guia ou janela.
+    Aguarda uma nova janela ou a reutilização da janela atual.
 
-    Retorna o identificador da nova janela ou None quando o Pentaho
-    reutilizar a própria guia.
+    Quando o Pentaho reutiliza a guia atual, a mudança de URL é
+    considerada sucesso e None é retornado.
     """
-    try:
-        WebDriverWait(
-            driver,
-            timeout,
-            poll_frequency=INTERVALO_VERIFICACAO,
-        ).until(
-            lambda navegador: bool(
-                set(navegador.window_handles)
-                - janelas_anteriores
-            )
+    def detectar_destino():
+        novas = (
+            set(driver.window_handles)
+            - janelas_anteriores
         )
 
+        if novas:
+            return (
+                "NOVA_JANELA",
+                novas.pop(),
+            )
+
+        if url_anterior is not None:
+            try:
+                if driver.current_url != url_anterior:
+                    return (
+                        "MESMA_JANELA",
+                        None,
+                    )
+            except WebDriverException:
+                return False
+
+        return False
+
+    try:
+        tipo, identificador = aguardar_condicao(
+            detectar_destino,
+            descricao="a abertura do relatório",
+            timeout=timeout,
+        )
     except TimeoutException:
         return None
 
-    novas_janelas = (
-        set(driver.window_handles)
-        - janelas_anteriores
-    )
+    if tipo == "NOVA_JANELA":
+        return identificador
 
-    if not novas_janelas:
-        return None
-
-    return novas_janelas.pop()
-
+    return None
 
 def abrir_arquivo_em_nova_janela(
     nome_arquivo: str,
@@ -1744,6 +2356,11 @@ def abrir_arquivo_em_nova_janela(
     )
 
     try:
+        url_anterior = driver.current_url
+    except WebDriverException:
+        url_anterior = None
+
+    try:
         # Algumas versões mostram a ação diretamente na barra
         # depois que o arquivo é selecionado.
         opcao = esperar_elemento(
@@ -1751,7 +2368,7 @@ def abrir_arquivo_em_nova_janela(
                 nome_acao
             ),
             clicavel=True,
-            timeout=5,
+            timeout=TIMEOUT_FALLBACK_CURTO,
             descricao=f"opção {nome_acao}",
         )
 
@@ -1787,7 +2404,8 @@ def abrir_arquivo_em_nova_janela(
 
     nova_janela = aguardar_nova_janela(
         janelas_anteriores,
-        timeout=20,
+        timeout=TIMEOUT,
+        url_anterior=url_anterior,
     )
 
     if nova_janela is not None:
@@ -2300,7 +2918,7 @@ def procurar_resultado_script_recursivamente(
 
     Quando encontra um elemento, mantém o driver no frame correto.
     """
-    if profundidade > 10:
+    if profundidade > MAX_PROFUNDIDADE_IFRAMES:
         return None
 
     try:
@@ -2364,45 +2982,39 @@ def procurar_resultado_script_recursivamente(
 def esperar_resultado_script(
     script: str,
     *argumentos,
-    timeout: int = TIMEOUT,
+    timeout: float | int | None = TIMEOUT,
     descricao: str = "elemento",
 ):
-    """Aguarda um script retornar um elemento ou valor válido."""
-    limite = time.monotonic() + timeout
+    """Aguarda um JavaScript retornar um elemento ou valor válido."""
+    def executar_busca():
+        if driver is None:
+            return False
 
-    while time.monotonic() < limite:
         try:
             driver.switch_to.default_content()
-
-            resultado = (
-                procurar_resultado_script_recursivamente(
-                    script,
-                    argumentos,
-                )
-            )
-
-            if resultado:
-                logger.info(
-                    "Elemento encontrado por script: %s",
-                    descricao,
-                )
-
-                return resultado
-
         except WebDriverException:
-            pass
+            return False
 
-        time.sleep(INTERVALO_VERIFICACAO)
+        return (
+            procurar_resultado_script_recursivamente(
+                script,
+                argumentos,
+            )
+            or False
+        )
 
-    try:
-        driver.switch_to.default_content()
-    except WebDriverException:
-        pass
-
-    raise TimeoutException(
-        f"Não foi possível encontrar: {descricao}"
+    resultado = aguardar_condicao(
+        executar_busca,
+        descricao=descricao,
+        timeout=timeout,
     )
 
+    logger.info(
+        "Elemento encontrado por script: %s",
+        descricao,
+    )
+
+    return resultado
 
 def esperar_dashboard_carregar() -> None:
     """Aguarda os controles principais do dashboard aparecerem."""
@@ -2436,7 +3048,7 @@ def localizar_controle_por_rotulo(
 
 def localizar_texto_exato_visivel(
     texto: str,
-    timeout: int = TIMEOUT,
+    timeout: float | int | None = TIMEOUT,
 ):
     """Localiza uma opção ou botão pelo texto exato visível."""
     return esperar_resultado_script(
@@ -2566,7 +3178,7 @@ def obter_icone_selecao_multiselect(
 
 
 def localizar_botao_apply_multiselect(
-    timeout: int = TIMEOUT,
+    timeout: float | int | None = TIMEOUT,
 ):
     """
     Aguarda o botão Apply ficar habilitado.
@@ -2610,39 +3222,43 @@ def localizar_botao_apply_multiselect(
 
 
 def aguardar_multiselect_fechar(
-    timeout: int = 15,
+    timeout: float | int | None = 30,
 ) -> None:
     """
-    Aguarda o painel do multiselect fechar após o Apply.
+    Aguarda o painel fechar.
 
-    A ausência dessa confirmação não interrompe o restante
-    da automação, pois algumas versões mantêm o painel aberto.
+    Esta é uma espera opcional: se o painel permanecer aberto, a
+    automação apenas registra o aviso e continua.
     """
-    try:
-        WebDriverWait(
-            driver,
-            timeout,
-            poll_frequency=INTERVALO_VERIFICACAO,
-        ).until(
-            lambda navegador: not any(
-                elemento.is_displayed()
-                for elemento in navegador.find_elements(
-                    By.CSS_SELECTOR,
-                    "button.filter-btn-apply",
-                )
+    def painel_fechou():
+        try:
+            botoes = driver.find_elements(
+                By.CSS_SELECTOR,
+                "button.filter-btn-apply",
             )
-        )
 
-    except (
-        TimeoutException,
-        StaleElementReferenceException,
-        WebDriverException,
-    ):
+            return not any(
+                elemento.is_displayed()
+                for elemento in botoes
+            )
+        except (
+            StaleElementReferenceException,
+            WebDriverException,
+        ):
+            return True
+
+    try:
+        aguardar_condicao(
+            painel_fechou,
+            descricao="o painel multiselect fechar",
+            timeout=timeout,
+            atualizar_status_periodicamente=False,
+        )
+    except TimeoutException:
         logger.warning(
             "O painel de clientes não confirmou o fechamento, "
             "mas o botão Apply já foi acionado."
         )
-
 
 def desmarcar_opcao_multiselect(
     rotulo: str,
@@ -2756,61 +3372,46 @@ def validar_data_hora(
     )
 
 
+def localizadores_input_data_hora(
+    painel_id: str,
+    input_id: str,
+) -> list[tuple[str, str]]:
+    """Retorna os seletores exatos de um campo de data/hora."""
+    return [
+        (
+            By.CSS_SELECTOR,
+            f"div#{painel_id} input#{input_id}",
+        ),
+        (
+            By.CSS_SELECTOR,
+            f"#{painel_id} input#{input_id}",
+        ),
+        (
+            By.XPATH,
+            f"//div[@id='{painel_id}']//input[@id='{input_id}']",
+        ),
+        (
+            By.CSS_SELECTOR,
+            f"#{painel_id} input[type='text']",
+        ),
+    ]
+
+
 def localizar_input_data_hora(
     painel_id: str,
     input_id: str,
     descricao: str,
 ):
-    """
-    Localiza o input de data usando os IDs exatos do dashboard.
-
-    Exemplos conhecidos:
-
-        #panelFilterDataInicial
-        #render_ticDataInicial
-
-        #panelFilterDataFinal
-        #render_ticDataFinal
-
-    A busca continua funcionando caso o relatório esteja dentro
-    de um iframe.
-    """
+    """Localiza o input de data/hora, inclusive em iframes."""
     return esperar_elemento(
-        [
-            (
-                By.CSS_SELECTOR,
-                (
-                    f"div#{painel_id} "
-                    f"input#{input_id}"
-                ),
-            ),
-            (
-                By.CSS_SELECTOR,
-                (
-                    f"#{painel_id} "
-                    f"input#{input_id}"
-                ),
-            ),
-            (
-                By.XPATH,
-                (
-                    f"//div[@id='{painel_id}']"
-                    f"//input[@id='{input_id}']"
-                ),
-            ),
-            (
-                By.CSS_SELECTOR,
-                (
-                    f"#{painel_id} "
-                    "input[type='text']"
-                ),
-            ),
-        ],
+        localizadores_input_data_hora(
+            painel_id,
+            input_id,
+        ),
         clicavel=True,
         timeout=TIMEOUT,
         descricao=descricao,
     )
-
 
 def definir_valor_input_com_eventos(
     campo,
@@ -2958,42 +3559,48 @@ def confirmar_valor_input(
     descricao: str,
 ) -> None:
     """
-    Localiza novamente o campo e confirma que o valor foi aplicado.
+    Confirma o valor sem o antigo limite fixo de 15 segundos.
 
-    O DOM do dashboard pode ser recriado após os eventos.
+    Usa uma busca de tentativa única dentro da condição para evitar
+    esperas aninhadas.
     """
-    def valor_foi_aplicado(_):
+    localizadores = localizadores_input_data_hora(
+        painel_id,
+        input_id,
+    )
+
+    def valor_foi_aplicado():
         try:
-            campo = localizar_input_data_hora(
-                painel_id=painel_id,
-                input_id=input_id,
-                descricao=descricao,
-            )
+            driver.switch_to.default_content()
+        except WebDriverException:
+            return False
 
+        campo = procurar_recursivamente_nos_frames(
+            localizadores,
+            True,
+        )
+
+        if campo is None:
+            return False
+
+        try:
             valor_atual = (
-                campo.get_attribute("value") or ""
+                campo.get_attribute("value")
+                or ""
             ).strip()
-
-            if valor_atual == valor_esperado:
-                return campo
-
         except (
-            TimeoutException,
             StaleElementReferenceException,
             WebDriverException,
         ):
             return False
 
-        return False
+        return campo if valor_atual == valor_esperado else False
 
-    WebDriverWait(
-        driver,
-        15,
-        poll_frequency=INTERVALO_VERIFICACAO,
-    ).until(
-        valor_foi_aplicado
+    aguardar_condicao(
+        valor_foi_aplicado,
+        descricao=f"a confirmação de {descricao}",
+        timeout=TIMEOUT,
     )
-
 
 def preencher_data_hora_por_id(
     *,
@@ -3185,16 +3792,10 @@ def executar_processo() -> None:
         # Antes de criar o WebDriver:
         # 1. fecha Chrome e Edge;
         # 2. aguarda 10 segundos;
-        # 3. só então abre um novo Chrome.
+        # 3. só então abre o navegador selecionado.
         preparar_navegadores()
 
-        atualizar_status("Abrindo o Chrome...")
-
-        opcoes = criar_opcoes_chrome()
-
-        driver = webdriver.Chrome(
-            options=opcoes
-        )
+        driver = criar_driver_navegador()
 
         aplicar_ajustes_apos_criar_driver()
 
@@ -3204,7 +3805,7 @@ def executar_processo() -> None:
 
         atualizar_status("Aguardando a página inicial...")
         aguardar_documento_pronto()
-        time.sleep(PAUSA_GLOBAL)
+        pausa_adicional("Carregamento da página inicial")
 
         realizar_login()
         abrir_browse_files()
@@ -3249,7 +3850,7 @@ def executar_processo() -> None:
         )
 
         # O filtro já foi aplicado. Agora coloca o relatório
-        # na última janela do Chrome em tela cheia.
+        # na última janela do navegador em tela cheia.
         ativar_tela_cheia_final()
 
         logger.info(
@@ -3276,7 +3877,7 @@ def executar_processo() -> None:
         exibir_erro(
             "Tempo limite",
             (
-                "Um elemento não apareceu dentro do prazo.\n\n"
+                "Uma espera configurada atingiu o prazo.\n\n"
                 f"{erro}\n\n"
                 "Um screenshot e o HTML foram salvos "
                 "na pasta diagnosticos."
@@ -3312,7 +3913,25 @@ def executar_processo() -> None:
 # ============================================================
 
 def validar_configuracao() -> bool:
-    """Valida as credenciais antes de iniciar o navegador."""
+    """Valida navegador, credenciais e horários."""
+    try:
+        navegador = navegador_selecionado()
+
+    except ValueError as erro:
+        registrar_erro_txt(
+            etapa="Validação do navegador",
+            erro=erro,
+        )
+
+        messagebox.showwarning(
+            "Navegador inválido",
+            (
+                f"{erro}\n\n"
+                "Configure NAVEGADOR como CHROME ou EDGE."
+            ),
+        )
+        return False
+
     if not USUARIO or USUARIO == "SEU_USUARIO":
         messagebox.showwarning(
             "Credenciais",
@@ -3350,16 +3969,28 @@ def validar_configuracao() -> bool:
         )
         return False
 
+    if not ESPERA_INDEFINIDA and TIMEOUT is None:
+        messagebox.showwarning(
+            "Espera inválida",
+            "Configure PENTAHO_TIMEOUT_SEGUNDOS com um valor maior que zero.",
+        )
+        return False
+
     logger.info(
-        "Configuração validada: agendamento=%s | "
-        "início=%s | fim=%s | fechar_telas=%s | "
-        "ocultar_aviso=%s | f11_final=%s",
+        "Configuração validada: navegador=%s | "
+        "agendamento=%s | início=%s | fim=%s | "
+        "fechar_telas=%s | ocultar_aviso=%s | f11_final=%s | "
+        "espera_indefinida=%s | timeout=%s | intervalo=%.2fs",
+        navegador,
         NOME_AGENDAMENTO,
         HORA_INICIAL,
         HORA_FINAL,
         FECHAR_TELAS,
         OCULTAR_AVISO_AUTOMACAO,
         ATIVAR_F11_NO_FINAL,
+        ESPERA_INDEFINIDA,
+        TIMEOUT,
+        INTERVALO_VERIFICACAO,
     )
 
     return True
@@ -3377,6 +4008,7 @@ def iniciar_processo_automaticamente() -> None:
         status_variavel.set("Informe o usuário e a senha.")
         return
 
+    EVENTO_CANCELAMENTO.clear()
     processo_em_execucao = True
     contador_variavel.set("Executando...")
     status_variavel.set("Iniciando o processo...")
@@ -3414,7 +4046,7 @@ def ao_fechar_janela() -> None:
             (
                 "A automação ainda está em execução.\n"
                 "Deseja fechar somente esta janela?\n\n"
-                "O Chrome poderá continuar aberto."
+                f"O {nome_navegador_exibicao()} poderá continuar aberto."
             ),
         )
 
@@ -3429,7 +4061,7 @@ def ao_fechar_janela() -> None:
 # ============================================================
 
 janela = tk.Tk()
-janela.title("Automação Pentaho")
+janela.title(f"Automação Pentaho — {NAVEGADOR}")
 janela.geometry("470x220")
 janela.resizable(False, False)
 janela.protocol("WM_DELETE_WINDOW", ao_fechar_janela)

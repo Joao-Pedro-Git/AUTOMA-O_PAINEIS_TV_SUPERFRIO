@@ -63,7 +63,7 @@ AGENDAMENTOS: tuple[AgendamentoPentaho, ...] = (
     ),
     AgendamentoPentaho(
         nome="T2",
-        horario_execucao="13:45:00",
+        horario_execucao="14:25:00",
         horario_inicial_pentaho="14:00:00",
         horario_final_pentaho="22:00:00",
         deslocamento_dia_inicial=0,
