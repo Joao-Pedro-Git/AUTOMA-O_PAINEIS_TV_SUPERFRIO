@@ -1498,7 +1498,13 @@ def esperar_elemento(
 # ============================================================
 
 def rolar_ate_elemento(elemento) -> None:
-    """Centraliza o elemento na área visível."""
+    """
+    Centraliza o elemento na área visível.
+
+    StaleElementReferenceException é propagada. Um elemento stale
+    não pode ser recuperado; a função chamadora precisa localizá-lo
+    novamente no DOM.
+    """
     driver.execute_script(
         """
         arguments[0].scrollIntoView({
@@ -1509,54 +1515,100 @@ def rolar_ate_elemento(elemento) -> None:
         """,
         elemento,
     )
-    time.sleep(0.4)
+
+    pausa_responsiva(
+        0.4
+    )
 
 
 def clicar(elemento) -> None:
-    """Tenta clique normal, ActionChains e JavaScript."""
-    rolar_ate_elemento(elemento)
+    """
+    Tenta clique normal, ActionChains e JavaScript.
+
+    Quando o elemento fica stale, a exceção é propagada
+    imediatamente. Reutilizar o mesmo WebElement em outro método
+    não funciona porque ele já não pertence ao DOM atual.
+    """
+    rolar_ate_elemento(
+        elemento
+    )
+
+    ultimo_erro: BaseException | None = None
 
     try:
         elemento.click()
         return
-    except (
-        StaleElementReferenceException,
-        WebDriverException,
-    ):
-        pass
+
+    except StaleElementReferenceException:
+        raise
+
+    except WebDriverException as erro:
+        ultimo_erro = erro
 
     try:
-        ActionChains(driver).move_to_element(
+        ActionChains(
+            driver
+        ).move_to_element(
             elemento
-        ).pause(0.3).click().perform()
+        ).pause(
+            0.3
+        ).click().perform()
+
         return
-    except (
-        StaleElementReferenceException,
-        WebDriverException,
-    ):
-        pass
 
-    driver.execute_script(
-        """
-        arguments[0].dispatchEvent(
-            new MouseEvent("mousedown", {
-                bubbles: true,
-                cancelable: true,
-                view: window
-            })
-        );
+    except StaleElementReferenceException:
+        raise
 
-        arguments[0].dispatchEvent(
-            new MouseEvent("mouseup", {
-                bubbles: true,
-                cancelable: true,
-                view: window
-            })
-        );
+    except WebDriverException as erro:
+        ultimo_erro = erro
 
-        arguments[0].click();
-        """,
-        elemento,
+    try:
+        driver.execute_script(
+            """
+            const elemento = arguments[0];
+
+            elemento.scrollIntoView({
+                block: "center",
+                inline: "center",
+                behavior: "instant"
+            });
+
+            elemento.dispatchEvent(
+                new MouseEvent("mousedown", {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    button: 0,
+                    buttons: 1
+                })
+            );
+
+            elemento.dispatchEvent(
+                new MouseEvent("mouseup", {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    button: 0,
+                    buttons: 0
+                })
+            );
+
+            elemento.click();
+            """,
+            elemento,
+        )
+
+        return
+
+    except StaleElementReferenceException:
+        raise
+
+    except WebDriverException as erro:
+        ultimo_erro = erro
+
+    raise WebDriverException(
+        "Não foi possível clicar no elemento atual. "
+        f"Último erro: {ultimo_erro}"
     )
 
 
@@ -3094,53 +3146,91 @@ def selecionar_opcao_dropdown(
     )
 
 
+def localizadores_opcao_multiselect(
+    opcao: str,
+) -> list[tuple[str, str]]:
+    """Cria seletores exatos para uma opção do multiselect."""
+    return [
+        (
+            By.CSS_SELECTOR,
+            (
+                "div.filter-item-label"
+                f"[title='{opcao}']"
+            ),
+        ),
+        (
+            By.XPATH,
+            (
+                "//div["
+                "contains("
+                "concat(' ', normalize-space(@class), ' '),"
+                "' filter-item-label '"
+                ") "
+                f"and @title='{opcao}' "
+                f"and normalize-space()='{opcao}'"
+                "]"
+            ),
+        ),
+    ]
+
+
+def tentar_localizar_linha_opcao_multiselect(
+    opcao: str,
+):
+    """
+    Procura a opção visível sem aguardar.
+
+    A busca sempre recomeça na página principal e percorre todos
+    os frames novamente. Isso evita reutilizar um frame ou elemento
+    que o Pentaho acabou de reconstruir.
+    """
+    if driver is None:
+        return None
+
+    try:
+        driver.switch_to.default_content()
+
+    except (
+        InvalidSessionIdException,
+        NoSuchWindowException,
+    ):
+        raise
+
+    except WebDriverException:
+        return None
+
+    return procurar_recursivamente_nos_frames(
+        localizadores_opcao_multiselect(
+            opcao
+        ),
+        clicavel=False,
+    )
+
+
 def localizar_linha_opcao_multiselect(
     opcao: str,
 ):
     """
-    Localiza uma opção do multiselect pelo atributo title.
+    Aguarda uma opção visível do multiselect pelo atributo title.
 
-    O componente deste dashboard não utiliza um input checkbox
-    tradicional. Cada item possui a seguinte estrutura:
-
-        div.filter-item-body
-            div.filter-item-selection-icon
-            span.filter-item-only-this
-            div.filter-item-label[title="MDLZ-MP"]
+    O elemento é sempre procurado novamente no DOM e no frame atual.
     """
-    return esperar_elemento(
-        [
-            (
-                By.CSS_SELECTOR,
-                (
-                    "div.filter-item-label"
-                    f"[title='{opcao}']"
-                ),
-            ),
-            (
-                By.XPATH,
-                (
-                    "//div["
-                    "contains("
-                    "concat(' ', normalize-space(@class), ' '),"
-                    "' filter-item-label '"
-                    ") "
-                    f"and @title='{opcao}' "
-                    f"and normalize-space()='{opcao}'"
-                    "]"
-                ),
-            ),
-        ],
-        clicavel=False,
-        timeout=TIMEOUT,
+    return aguardar_condicao(
+        lambda: (
+            tentar_localizar_linha_opcao_multiselect(
+                opcao
+            )
+            or False
+        ),
         descricao=f"opção do cliente {opcao}",
+        timeout=TIMEOUT,
     )
 
 
 def obter_corpo_opcao_multiselect(
     rotulo_opcao,
 ):
-    """Retorna a linha filter-item-body da opção."""
+    """Retorna a linha filter-item-body da opção atual."""
     try:
         return rotulo_opcao.find_element(
             By.XPATH,
@@ -3154,22 +3244,27 @@ def obter_corpo_opcao_multiselect(
             ),
         )
 
+    except StaleElementReferenceException:
+        raise
+
     except NoSuchElementException as erro:
         raise TimeoutException(
-            "Não foi possível localizar a linha da opção "
-            f"{rotulo_opcao.text!r}."
+            "Não foi possível localizar a linha da opção."
         ) from erro
 
 
 def obter_icone_selecao_multiselect(
     corpo_opcao,
 ):
-    """Localiza o ícone usado para marcar ou desmarcar a opção."""
+    """Localiza o ícone atual usado para marcar ou desmarcar."""
     try:
         return corpo_opcao.find_element(
             By.CSS_SELECTOR,
             ".filter-item-selection-icon",
         )
+
+    except StaleElementReferenceException:
+        raise
 
     except NoSuchElementException as erro:
         raise TimeoutException(
@@ -3177,72 +3272,412 @@ def obter_icone_selecao_multiselect(
         ) from erro
 
 
+SCRIPT_ESTADO_OPCAO_MULTISELECT = r"""
+const rotulo = arguments[0];
+
+if (!rotulo) {
+    return "unknown";
+}
+
+function classes(elemento) {
+    return String(
+        elemento && elemento.className || ""
+    )
+        .trim()
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(Boolean);
+}
+
+const corpo = (
+    rotulo.closest(".filter-item-body") ||
+    rotulo.parentElement ||
+    rotulo
+);
+
+let atual = corpo;
+
+for (
+    let nivel = 0;
+    nivel < 7 && atual;
+    nivel += 1
+) {
+    const lista = classes(atual);
+
+    if (
+        lista.includes("none-selected") ||
+        lista.includes("unselected")
+    ) {
+        return "unselected";
+    }
+
+    if (
+        lista.includes("all-selected") ||
+        lista.includes("selected") ||
+        lista.includes("checked") ||
+        lista.includes("active")
+    ) {
+        return "selected";
+    }
+
+    if (
+        lista.includes("some-selected") ||
+        lista.includes("partially-selected") ||
+        lista.includes("partial-selected") ||
+        lista.includes("indeterminate")
+    ) {
+        return "partial";
+    }
+
+    const ariaChecked = String(
+        atual.getAttribute &&
+        atual.getAttribute("aria-checked") || ""
+    ).trim().toLowerCase();
+
+    const ariaSelected = String(
+        atual.getAttribute &&
+        atual.getAttribute("aria-selected") || ""
+    ).trim().toLowerCase();
+
+    if (
+        ariaChecked === "true" ||
+        ariaSelected === "true"
+    ) {
+        return "selected";
+    }
+
+    if (
+        ariaChecked === "false" ||
+        ariaSelected === "false"
+    ) {
+        return "unselected";
+    }
+
+    if (ariaChecked === "mixed") {
+        return "partial";
+    }
+
+    atual = atual.parentElement;
+}
+
+const checkbox = corpo.querySelector(
+    'input[type="checkbox"]'
+);
+
+if (checkbox) {
+    if (checkbox.indeterminate) {
+        return "partial";
+    }
+
+    return checkbox.checked
+        ? "selected"
+        : "unselected";
+}
+
+const icone = corpo.querySelector(
+    ".filter-item-selection-icon"
+);
+
+if (icone) {
+    const antes = window.getComputedStyle(
+        icone,
+        "::before"
+    );
+
+    const depois = window.getComputedStyle(
+        icone,
+        "::after"
+    );
+
+    const conteudo = [
+        icone.textContent,
+        antes.content,
+        depois.content
+    ].join(" ");
+
+    if (
+        conteudo.includes("✓") ||
+        conteudo.includes("✔") ||
+        conteudo.toLowerCase().includes("check")
+    ) {
+        return "selected";
+    }
+}
+
+return "unknown";
+"""
+
+
+def obter_estado_opcao_multiselect(
+    rotulo_opcao,
+) -> str:
+    """
+    Retorna selected, unselected, partial ou unknown.
+
+    O elemento deve ter sido localizado imediatamente antes desta
+    chamada. StaleElementReferenceException é propagada para que a
+    função principal relocalize tudo.
+    """
+    estado = driver.execute_script(
+        SCRIPT_ESTADO_OPCAO_MULTISELECT,
+        rotulo_opcao,
+    )
+
+    estado_texto = str(
+        estado or "unknown"
+    ).strip().lower()
+
+    if estado_texto in {
+        "selected",
+        "unselected",
+        "partial",
+        "unknown",
+    }:
+        return estado_texto
+
+    return "unknown"
+
+
+def localizadores_botao_apply_multiselect() -> list[tuple[str, str]]:
+    """Seletores do Apply dirty e habilitado."""
+    return [
+        (
+            By.CSS_SELECTOR,
+            (
+                "button.filter-btn-apply"
+                ".dirty:not([disabled])"
+            ),
+        ),
+        (
+            By.XPATH,
+            (
+                "//button["
+                "contains("
+                "concat(' ', normalize-space(@class), ' '),"
+                "' filter-btn-apply '"
+                ") "
+                "and contains("
+                "concat(' ', normalize-space(@class), ' '),"
+                "' dirty '"
+                ") "
+                "and not(@disabled) "
+                "and normalize-space()='Apply'"
+                "]"
+            ),
+        ),
+    ]
+
+
+def tentar_localizar_botao_apply_multiselect():
+    """
+    Procura o Apply habilitado sem aguardar.
+
+    A busca também relocaliza o frame, portanto não depende do frame
+    ou do WebElement usado antes da atualização do dashboard.
+    """
+    if driver is None:
+        return None
+
+    try:
+        driver.switch_to.default_content()
+
+    except (
+        InvalidSessionIdException,
+        NoSuchWindowException,
+    ):
+        raise
+
+    except WebDriverException:
+        return None
+
+    return procurar_recursivamente_nos_frames(
+        localizadores_botao_apply_multiselect(),
+        clicavel=True,
+    )
+
+
 def localizar_botao_apply_multiselect(
     timeout: float | int | None = TIMEOUT,
 ):
     """
-    Aguarda o botão Apply ficar habilitado.
-
-    Quando uma alteração é realizada, o componente adiciona
-    a classe 'dirty' ao botão:
-
-        button.filter-btn-apply.dirty
+    Aguarda o Apply ficar dirty e habilitado, relocalizando o DOM.
     """
-    return esperar_elemento(
-        [
-            (
-                By.CSS_SELECTOR,
-                (
-                    "button.filter-btn-apply"
-                    ".dirty:not([disabled])"
-                ),
-            ),
-            (
-                By.XPATH,
-                (
-                    "//button["
-                    "contains("
-                    "concat(' ', normalize-space(@class), ' '),"
-                    "' filter-btn-apply '"
-                    ") "
-                    "and contains("
-                    "concat(' ', normalize-space(@class), ' '),"
-                    "' dirty '"
-                    ") "
-                    "and not(@disabled) "
-                    "and normalize-space()='Apply'"
-                    "]"
-                ),
-            ),
-        ],
-        clicavel=True,
-        timeout=timeout,
+    return aguardar_condicao(
+        lambda: (
+            tentar_localizar_botao_apply_multiselect()
+            or False
+        ),
         descricao="botão Apply habilitado do multiselect",
+        timeout=timeout,
     )
+
+
+def fechar_multiselect_sem_aplicar() -> None:
+    """Fecha um multiselect aberto usando Escape."""
+    if driver is None:
+        return
+
+    try:
+        driver.switch_to.active_element.send_keys(
+            Keys.ESCAPE
+        )
+
+        pausa_responsiva(
+            0.5
+        )
+
+    except (
+        StaleElementReferenceException,
+        WebDriverException,
+    ):
+        pass
+
+
+def abrir_multiselect_relocalizando(
+    rotulo: str,
+    opcao_visivel: str,
+):
+    """
+    Abre o multiselect relocalizando controle, frame e opção.
+
+    O painel somente é considerado aberto quando a opção desejada
+    está realmente visível.
+    """
+    tentativa = 0
+
+    while True:
+        if EVENTO_CANCELAMENTO.is_set():
+            raise InterruptedError(
+                f"Automação cancelada ao abrir {rotulo}."
+            )
+
+        tentativa += 1
+
+        rotulo_opcao = (
+            tentar_localizar_linha_opcao_multiselect(
+                opcao_visivel
+            )
+        )
+
+        if rotulo_opcao is not None:
+            logger.info(
+                "%s aberto e confirmado pela opção %s.",
+                rotulo,
+                opcao_visivel,
+            )
+
+            return rotulo_opcao
+
+        atualizar_status(
+            f"Abrindo {rotulo} "
+            f"— tentativa {tentativa}..."
+        )
+
+        try:
+            controle = localizar_controle_por_rotulo(
+                rotulo
+            )
+
+            clicar(
+                controle
+            )
+
+        except (
+            StaleElementReferenceException,
+            NoSuchFrameException,
+        ) as erro:
+            logger.warning(
+                "O controle %s foi recriado antes do clique: %s. "
+                "Relocalizando...",
+                rotulo,
+                erro,
+            )
+
+            pausa_responsiva(
+                0.8
+            )
+
+            continue
+
+        except (
+            InvalidSessionIdException,
+            NoSuchWindowException,
+        ):
+            raise
+
+        except WebDriverException as erro:
+            logger.warning(
+                "Falha temporária ao clicar em %s: %s. "
+                "Relocalizando...",
+                rotulo,
+                erro,
+            )
+
+            pausa_responsiva(
+                0.8
+            )
+
+            continue
+
+        try:
+            return aguardar_condicao(
+                lambda: (
+                    tentar_localizar_linha_opcao_multiselect(
+                        opcao_visivel
+                    )
+                    or False
+                ),
+                descricao=(
+                    f"a abertura de {rotulo} "
+                    f"com a opção {opcao_visivel}"
+                ),
+                timeout=max(
+                    5.0,
+                    TIMEOUT_FALLBACK_CURTO,
+                ),
+                intervalo=0.25,
+                atualizar_status_periodicamente=False,
+            )
+
+        except TimeoutException:
+            logger.warning(
+                "%s ainda não abriu após a tentativa %d. "
+                "O controle será relocalizado.",
+                rotulo,
+                tentativa,
+            )
+
+            pausa_responsiva(
+                0.8
+            )
 
 
 def aguardar_multiselect_fechar(
     timeout: float | int | None = 30,
 ) -> None:
     """
-    Aguarda o painel fechar.
+    Aguarda o painel fechar, relocalizando em todos os frames.
 
-    Esta é uma espera opcional: se o painel permanecer aberto, a
-    automação apenas registra o aviso e continua.
+    A ausência de confirmação não interrompe a automação.
     """
     def painel_fechou():
         try:
-            botoes = driver.find_elements(
-                By.CSS_SELECTOR,
-                "button.filter-btn-apply",
+            if (
+                tentar_localizar_botao_apply_multiselect()
+                is not None
+            ):
+                return False
+
+            return (
+                tentar_localizar_linha_opcao_multiselect(
+                    CLIENTE_PARA_REMOVER
+                )
+                is None
             )
 
-            return not any(
-                elemento.is_displayed()
-                for elemento in botoes
-            )
         except (
             StaleElementReferenceException,
+            NoSuchFrameException,
             WebDriverException,
         ):
             return True
@@ -3254,93 +3689,333 @@ def aguardar_multiselect_fechar(
             timeout=timeout,
             atualizar_status_periodicamente=False,
         )
+
     except TimeoutException:
         logger.warning(
             "O painel de clientes não confirmou o fechamento, "
             "mas o botão Apply já foi acionado."
         )
 
+
+def clicar_apply_multiselect_relocalizando(
+    opcao: str,
+) -> None:
+    """
+    Clica no Apply usando um WebElement novo em cada tentativa.
+    """
+    tentativa = 0
+
+    while True:
+        if EVENTO_CANCELAMENTO.is_set():
+            raise InterruptedError(
+                "Automação cancelada antes do Apply."
+            )
+
+        tentativa += 1
+
+        botao_apply = (
+            tentar_localizar_botao_apply_multiselect()
+        )
+
+        if botao_apply is None:
+            if (
+                tentar_localizar_linha_opcao_multiselect(
+                    opcao
+                )
+                is None
+            ):
+                logger.info(
+                    "O painel fechou após o Apply."
+                )
+
+                return
+
+            botao_apply = localizar_botao_apply_multiselect(
+                timeout=TIMEOUT
+            )
+
+        atualizar_status(
+            "Aplicando a remoção de "
+            f"{opcao} — tentativa {tentativa}..."
+        )
+
+        try:
+            clicar(
+                botao_apply
+            )
+
+            aguardar_multiselect_fechar(
+                timeout=30
+            )
+
+            return
+
+        except (
+            StaleElementReferenceException,
+            NoSuchFrameException,
+        ) as erro:
+            logger.warning(
+                "O botão Apply foi recriado antes do clique: %s. "
+                "Relocalizando...",
+                erro,
+            )
+
+            pausa_responsiva(
+                0.8
+            )
+
+        except (
+            InvalidSessionIdException,
+            NoSuchWindowException,
+        ):
+            raise
+
+        except WebDriverException as erro:
+            logger.warning(
+                "Falha temporária ao clicar no Apply: %s. "
+                "Relocalizando...",
+                erro,
+            )
+
+            pausa_responsiva(
+                0.8
+            )
+
+
 def desmarcar_opcao_multiselect(
     rotulo: str,
     opcao: str,
 ) -> None:
     """
-    Abre o seletor de clientes, desmarca somente a opção informada
-    e clica no botão Apply habilitado.
+    Desmarca somente a opção informada e aplica a alteração.
 
-    Esta implementação é específica para o DOM observado:
-
-        div.filter-item-label[title="MDLZ-MP"]
-        div.filter-item-selection-icon
-        button.filter-btn-apply.dirty
+    Todos os elementos são relocalizados depois de qualquer mudança:
+    controle, frame, rótulo, linha, ícone e botão Apply.
     """
-    atualizar_status(
-        f"Abrindo {rotulo}..."
+    tentativa = 0
+    proximo_aviso = (
+        time.monotonic()
+        + INTERVALO_AVISO_ESPERA
     )
 
-    controle = localizar_controle_por_rotulo(
-        rotulo
-    )
+    while True:
+        if EVENTO_CANCELAMENTO.is_set():
+            raise InterruptedError(
+                f"Automação cancelada ao remover {opcao}."
+            )
 
-    clicar(controle)
+        tentativa += 1
 
-    # Aguarda a animação de abertura do painel.
-    time.sleep(0.8)
+        atualizar_status(
+            f"Configurando {rotulo}: remover {opcao} "
+            f"— tentativa {tentativa}..."
+        )
 
-    atualizar_status(
-        f"Localizando somente o cliente {opcao}..."
-    )
+        try:
+            # Uma tentativa anterior pode já ter alterado a opção.
+            if (
+                tentar_localizar_botao_apply_multiselect()
+                is not None
+            ):
+                logger.info(
+                    "Alteração pendente detectada. "
+                    "Aplicando sem repetir o clique em %s.",
+                    opcao,
+                )
 
-    rotulo_opcao = localizar_linha_opcao_multiselect(
-        opcao
-    )
+                clicar_apply_multiselect_relocalizando(
+                    opcao
+                )
 
-    corpo_opcao = obter_corpo_opcao_multiselect(
-        rotulo_opcao
-    )
+                pausa_adicional(
+                    f"Remoção do cliente {opcao}"
+                )
 
-    icone_selecao = obter_icone_selecao_multiselect(
-        corpo_opcao
-    )
+                return
 
-    atualizar_status(
-        f"Desmarcando somente {opcao}..."
-    )
+            abrir_multiselect_relocalizando(
+                rotulo,
+                opcao,
+            )
 
-    # Clica diretamente no ícone azul de seleção.
-    # Não clica em "All", "Only" nem em MDLZ-PA.
-    clicar(icone_selecao)
+            rotulo_opcao = localizar_linha_opcao_multiselect(
+                opcao
+            )
 
-    # O botão Apply deve ganhar a classe "dirty" depois da mudança.
-    atualizar_status(
-        "Aguardando o botão Apply ser habilitado..."
-    )
+            estado_inicial = obter_estado_opcao_multiselect(
+                rotulo_opcao
+            )
 
-    botao_apply = localizar_botao_apply_multiselect(
-        timeout=TIMEOUT
-    )
+            logger.info(
+                "Estado atual de %s: %s",
+                opcao,
+                estado_inicial,
+            )
 
-    atualizar_status(
-        "Aplicando a remoção de MDLZ-MP..."
-    )
+            if estado_inicial == "unselected":
+                logger.info(
+                    "%s já estava desmarcado. "
+                    "Nenhum clique é necessário.",
+                    opcao,
+                )
 
-    clicar(botao_apply)
+                fechar_multiselect_sem_aplicar()
 
-    aguardar_multiselect_fechar(
-        timeout=15
-    )
+                pausa_adicional(
+                    f"Verificação do cliente {opcao}"
+                )
 
-    time.sleep(0.8)
+                return
 
-    logger.info(
-        "Cliente desmarcado e aplicado com sucesso: %s",
-        opcao,
-    )
+            # Relocaliza toda a cadeia imediatamente antes do clique.
+            rotulo_opcao = localizar_linha_opcao_multiselect(
+                opcao
+            )
 
-    pausa_adicional(
-        f"Remoção do cliente {opcao}"
-    )
+            corpo_opcao = obter_corpo_opcao_multiselect(
+                rotulo_opcao
+            )
 
+            icone_selecao = obter_icone_selecao_multiselect(
+                corpo_opcao
+            )
+
+            atualizar_status(
+                f"Desmarcando somente {opcao}..."
+            )
+
+            clicar(
+                icone_selecao
+            )
+
+            try:
+                aguardar_condicao(
+                    lambda: (
+                        tentar_localizar_botao_apply_multiselect()
+                        or False
+                    ),
+                    descricao=(
+                        "o Apply ficar habilitado após "
+                        f"desmarcar {opcao}"
+                    ),
+                    timeout=max(
+                        8.0,
+                        TIMEOUT_FALLBACK_CURTO,
+                    ),
+                    intervalo=0.25,
+                    atualizar_status_periodicamente=False,
+                )
+
+            except TimeoutException:
+                # Antes de repetir o clique, confere o estado novo.
+                rotulo_atual = (
+                    tentar_localizar_linha_opcao_multiselect(
+                        opcao
+                    )
+                )
+
+                if rotulo_atual is not None:
+                    estado_atual = (
+                        obter_estado_opcao_multiselect(
+                            rotulo_atual
+                        )
+                    )
+
+                    logger.warning(
+                        "Apply ainda não apareceu; "
+                        "estado relocalizado de %s: %s",
+                        opcao,
+                        estado_atual,
+                    )
+
+                    if (
+                        estado_atual == "unselected"
+                        and tentar_localizar_botao_apply_multiselect()
+                        is None
+                    ):
+                        logger.info(
+                            "%s está desmarcado e não existe "
+                            "alteração pendente para aplicar.",
+                            opcao,
+                        )
+
+                        fechar_multiselect_sem_aplicar()
+
+                        pausa_adicional(
+                            f"Remoção do cliente {opcao}"
+                        )
+
+                        return
+
+                pausa_responsiva(
+                    0.8
+                )
+
+                continue
+
+            clicar_apply_multiselect_relocalizando(
+                opcao
+            )
+
+            logger.info(
+                "Cliente desmarcado e aplicado com sucesso: %s",
+                opcao,
+            )
+
+            pausa_adicional(
+                f"Remoção do cliente {opcao}"
+            )
+
+            return
+
+        except (
+            StaleElementReferenceException,
+            NoSuchFrameException,
+        ) as erro:
+            logger.warning(
+                "O Pentaho recriou o DOM durante a remoção "
+                "de %s: %s. Tudo será relocalizado.",
+                opcao,
+                erro,
+            )
+
+        except (
+            InvalidSessionIdException,
+            NoSuchWindowException,
+        ):
+            raise
+
+        except (
+            JavascriptException,
+            TimeoutException,
+            WebDriverException,
+        ) as erro:
+            logger.warning(
+                "Falha transitória ao remover %s "
+                "na tentativa %d: %s. "
+                "O processo continuará relocalizando.",
+                opcao,
+                tentativa,
+                erro,
+            )
+
+        agora = time.monotonic()
+
+        if agora >= proximo_aviso:
+            atualizar_status(
+                f"Ainda configurando {opcao}. "
+                f"Tentativas realizadas: {tentativa}. "
+                "O processo continuará aguardando..."
+            )
+
+            proximo_aviso = (
+                agora
+                + INTERVALO_AVISO_ESPERA
+            )
+
+        pausa_responsiva(
+            1.0
+        )
 
 
 def validar_data_hora(

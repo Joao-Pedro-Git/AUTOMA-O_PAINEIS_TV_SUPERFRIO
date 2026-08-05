@@ -1,0 +1,103 @@
+
+================================================================================
+DATA/HORA: 05/08/2026 13:22:32
+AGENDAMENTO: T1
+ETAPA: Erro geral durante a automação
+NAVEGADOR: EDGE
+TIPO: StaleElementReferenceException
+MENSAGEM: Message: stale element reference: stale element not found in the current frame
+  (Session info: MicrosoftEdge=151.0.4129.59); For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#staleelementreferenceexception
+Stacktrace:
+	msedgedriver!GetHandleVerifier [0x7ff65d530375+e3f5]
+	msedgedriver!GetHandleVerifier [0x7ff65d5303d4+e454]
+	msedgedriver!GetHandleVerifier [0x7ff65dbed3e2+6cb462]
+	msedgedriver!(No symbol) [0x7ff65ceeb0c2]
+	msedgedriver!(No symbol) [0x7ff65ceed7dd]
+	msedgedriver!(No symbol) [0x7ff65cf6c0af]
+	msedgedriver!(No symbol) [0x7ff65cf4fdaa]
+	msedgedriver!(No symbol) [0x7ff65cf26287]
+	msedgedriver!(No symbol) [0x7ff65cf6b638]
+	msedgedriver!(No symbol) [0x7ff65cf25acc]
+	msedgedriver!(No symbol) [0x7ff65cf24d26]
+	msedgedriver!(No symbol) [0x7ff65cf258f3]
+	msedgedriver!(No symbol) [0x7ff65d180eeb]
+	msedgedriver!(No symbol) [0x7ff65d17d304]
+	msedgedriver!GetHandleVerifier [0x7ff65d55d2c5+3b345]
+	msedgedriver!GetHandleVerifier [0x7ff65d54be41+29ec1]
+	msedgedriver!GetHandleVerifier [0x7ff65d554786+32806]
+	msedgedriver!GetHandleVerifier [0x7ff65d537d34+15db4]
+	msedgedriver!GetHandleVerifier [0x7ff65d537e55+15ed5]
+	msedgedriver!GetHandleVerifier [0x7ff65d5243c3+2443]
+	KERNEL32!BaseThreadInitThunk [0x7ff8b32ce957+17]
+	ntdll!RtlUserThreadStart [0x7ff8b458ad6c+2c]
+
+HORA INICIAL: 05/08/2026 06:00:00
+HORA FINAL: 05/08/2026 14:00:00
+
+TRACEBACK:
+Traceback (most recent call last):
+  File "C:\Users\JOAO.PEREIRA\Downloads\Python\automacao-jp-gestao-operacional-pentaho\utils\gerar_relatorio.py", line 3847, in executar_processo
+    configurar_dashboard(
+    ~~~~~~~~~~~~~~~~~~~~^
+        hora_inicial=HORA_INICIAL,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+        hora_final=HORA_FINAL,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\JOAO.PEREIRA\Downloads\Python\automacao-jp-gestao-operacional-pentaho\utils\gerar_relatorio.py", line 3747, in configurar_dashboard
+    desmarcar_opcao_multiselect(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        "Selecione o(s) cliente(s)",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        CLIENTE_PARA_REMOVER,
+        ^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\JOAO.PEREIRA\Downloads\Python\automacao-jp-gestao-operacional-pentaho\utils\gerar_relatorio.py", line 3285, in desmarcar_opcao_multiselect
+    clicar(controle)
+    ~~~~~~^^^^^^^^^^
+  File "C:\Users\JOAO.PEREIRA\Downloads\Python\automacao-jp-gestao-operacional-pentaho\utils\gerar_relatorio.py", line 1539, in clicar
+    driver.execute_script(
+    ~~~~~~~~~~~~~~~~~~~~~^
+        """
+        ^^^
+    ...<18 lines>...
+        elemento,
+        ^^^^^^^^^
+    )
+    ^
+  File "C:\Users\JOAO.PEREIRA\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\selenium\webdriver\remote\webdriver.py", line 602, in execute_script
+    return self.execute(command, {"script": script, "args": converted_args})["value"]
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\JOAO.PEREIRA\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\selenium\webdriver\remote\webdriver.py", line 492, in execute
+    self.error_handler.check_response(response)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\JOAO.PEREIRA\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\selenium\webdriver\remote\errorhandler.py", line 232, in check_response
+    raise exception_class(message, screen, stacktrace)
+selenium.common.exceptions.StaleElementReferenceException: Message: stale element reference: stale element not found in the current frame
+  (Session info: MicrosoftEdge=151.0.4129.59); For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#staleelementreferenceexception
+Stacktrace:
+	msedgedriver!GetHandleVerifier [0x7ff65d530375+e3f5]
+	msedgedriver!GetHandleVerifier [0x7ff65d5303d4+e454]
+	msedgedriver!GetHandleVerifier [0x7ff65dbed3e2+6cb462]
+	msedgedriver!(No symbol) [0x7ff65ceeb0c2]
+	msedgedriver!(No symbol) [0x7ff65ceed7dd]
+	msedgedriver!(No symbol) [0x7ff65cf6c0af]
+	msedgedriver!(No symbol) [0x7ff65cf4fdaa]
+	msedgedriver!(No symbol) [0x7ff65cf26287]
+	msedgedriver!(No symbol) [0x7ff65cf6b638]
+	msedgedriver!(No symbol) [0x7ff65cf25acc]
+	msedgedriver!(No symbol) [0x7ff65cf24d26]
+	msedgedriver!(No symbol) [0x7ff65cf258f3]
+	msedgedriver!(No symbol) [0x7ff65d180eeb]
+	msedgedriver!(No symbol) [0x7ff65d17d304]
+	msedgedriver!GetHandleVerifier [0x7ff65d55d2c5+3b345]
+	msedgedriver!GetHandleVerifier [0x7ff65d54be41+29ec1]
+	msedgedriver!GetHandleVerifier [0x7ff65d554786+32806]
+	msedgedriver!GetHandleVerifier [0x7ff65d537d34+15db4]
+	msedgedriver!GetHandleVerifier [0x7ff65d537e55+15ed5]
+	msedgedriver!GetHandleVerifier [0x7ff65d5243c3+2443]
+	KERNEL32!BaseThreadInitThunk [0x7ff8b32ce957+17]
+	ntdll!RtlUserThreadStart [0x7ff8b458ad6c+2c]
+================================================================================
