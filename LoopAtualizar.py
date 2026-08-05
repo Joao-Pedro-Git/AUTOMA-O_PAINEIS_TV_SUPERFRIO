@@ -55,7 +55,7 @@ class AgendamentoPentaho:
 AGENDAMENTOS: tuple[AgendamentoPentaho, ...] = (
     AgendamentoPentaho(
         nome="T1",
-        horario_execucao="05:45:00", # Esse horarios é responsável por disparar a automação.
+        horario_execucao="07:45:00", # Esse horarios é responsável por disparar a automação.
         horario_inicial_pentaho="06:00:00", # Esse horario é responsável pela data INICIAL do RELATOIO DO PENTAHO.
         horario_final_pentaho="14:00:00", # Esse horario é responsável pela data FINAL do RELATOIO DO PENTAHO.
         deslocamento_dia_inicial=0,
@@ -63,7 +63,7 @@ AGENDAMENTOS: tuple[AgendamentoPentaho, ...] = (
     ),
     AgendamentoPentaho(
         nome="T2",
-        horario_execucao="14:25:00",
+        horario_execucao="13:45:00",
         horario_inicial_pentaho="14:00:00",
         horario_final_pentaho="22:00:00",
         deslocamento_dia_inicial=0,
@@ -73,9 +73,10 @@ AGENDAMENTOS: tuple[AgendamentoPentaho, ...] = (
         nome="T3",
         horario_execucao="21:45:00",
         horario_inicial_pentaho="22:00:00",
-        horario_final_pentaho="05:50:00",
+        horario_final_pentaho="06:00:00",
         deslocamento_dia_inicial=0,
-        deslocamento_dia_final=0,
+        # D+1: a data final será o dia seguinte.
+        deslocamento_dia_final=1,
     ),
 )
 
